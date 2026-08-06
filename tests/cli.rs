@@ -169,7 +169,7 @@ fn flavours_conflicts_with_explicit_template() -> Result<()> {
             "list",
             "--flavours",
             "--template",
-            "{name}",
+            "{%name}",
         ])
         .assert()
         .failure()

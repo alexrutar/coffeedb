@@ -1,53 +1,173 @@
 use std::{convert::Infallible, fmt, str::FromStr};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 use mufmt::{Ast, Manifest};
 
 use crate::record::Coffee;
 
-pub const DEFAULT_TEMPLATE: &str = "{label}: {name} — {roaster} {origin}";
+pub const DEFAULT_TEMPLATE: &str = r#"{%label}: {%name} — {%roaster}{=origin " "}{origin?}"#;
 
 #[derive(Debug, Clone, Copy)]
-enum Key {
-    Label,
-    Added,
-    Name,
+enum Field {
     RoastDate,
-    Roaster,
     Origin,
     Producer,
     Farm,
     Elevation,
     Variety,
     Process,
-    Flavours,
 }
 
-impl Ast<'_> for Key {
-    type Error = anyhow::Error;
+impl FromStr for Field {
+    type Err = anyhow::Error;
 
-    fn from_expr(expression: &str) -> Result<Self> {
-        match expression {
-            "label" => Ok(Self::Label),
-            "added" => Ok(Self::Added),
-            "name" => Ok(Self::Name),
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
             "roast_date" => Ok(Self::RoastDate),
-            "roaster" => Ok(Self::Roaster),
             "origin" => Ok(Self::Origin),
             "producer" => Ok(Self::Producer),
             "farm" => Ok(Self::Farm),
             "elevation" => Ok(Self::Elevation),
             "variety" => Ok(Self::Variety),
             "process" => Ok(Self::Process),
-            "%flavours" => Ok(Self::Flavours),
-            _ => Err(anyhow!("unknown Coffee column '{expression}'")),
+            _ => Err(anyhow!("unknown Coffee column '{value}'")),
+        }
+    }
+}
+
+impl Field {
+    fn is_defined(self, coffee: &Coffee) -> bool {
+        match self {
+            Self::RoastDate => coffee.data.roast_date.is_some(),
+            Self::Origin => coffee.data.origin.is_some(),
+            Self::Producer => coffee.data.producer.is_some(),
+            Self::Farm => coffee.data.farm.is_some(),
+            Self::Elevation => coffee.data.elevation.is_some(),
+            Self::Variety => coffee.data.variety.is_some(),
+            Self::Process => coffee.data.process.is_some(),
+        }
+    }
+
+    fn render(self, coffee: &Coffee) -> String {
+        match self {
+            Self::RoastDate => coffee
+                .data
+                .roast_date
+                .map(|date| date.to_string())
+                .unwrap_or_default(),
+            Self::Origin => coffee.data.origin.clone().unwrap_or_default(),
+            Self::Producer => coffee.data.producer.clone().unwrap_or_default(),
+            Self::Farm => coffee.data.farm.clone().unwrap_or_default(),
+            Self::Elevation => coffee.data.elevation.clone().unwrap_or_default(),
+            Self::Variety => coffee.data.variety.clone().unwrap_or_default(),
+            Self::Process => coffee.data.process.clone().unwrap_or_default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Meta {
+    Label,
+    Added,
+    Name,
+    Roaster,
+    Flavours,
+}
+
+impl FromStr for Meta {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "label" => Ok(Self::Label),
+            "added" => Ok(Self::Added),
+            "name" => Ok(Self::Name),
+            "roaster" => Ok(Self::Roaster),
+            "flavours" => Ok(Self::Flavours),
+            _ => Err(anyhow!("unknown template meta key '%{value}'")),
         }
     }
 }
 
 #[derive(Debug, Clone)]
+enum Atom {
+    Field(Field),
+    String(String),
+    Meta(Meta),
+}
+
+impl Atom {
+    fn parse(value: &str) -> Result<Self> {
+        if value.starts_with('"') {
+            return Ok(Self::String(serde_json::from_str(value)?));
+        }
+        if let Some(meta) = value.strip_prefix('%') {
+            return Ok(Self::Meta(meta.parse()?));
+        }
+
+        let field = value.strip_suffix('?').unwrap_or(value).parse()?;
+        Ok(Self::Field(field))
+    }
+
+    fn render(&self, coffee: &Coffee) -> String {
+        match self {
+            Self::Field(field) => field.render(coffee),
+            Self::String(value) => value.clone(),
+            Self::Meta(Meta::Label) => coffee.label.to_string(),
+            Self::Meta(Meta::Added) => coffee.added.to_string(),
+            Self::Meta(Meta::Name) => coffee.data.name.clone(),
+            Self::Meta(Meta::Roaster) => coffee.data.roaster.clone(),
+            Self::Meta(Meta::Flavours) => coffee.data.flavours.join(", "),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum Expression {
+    Bare(Atom),
+    IfDefined(Field, Atom),
+    IfUndefined(Field, Atom),
+}
+
+impl Ast<'_> for Expression {
+    type Error = anyhow::Error;
+
+    fn from_expr(value: &str) -> Result<Self> {
+        let Some(condition) = value
+            .as_bytes()
+            .first()
+            .copied()
+            .filter(|byte| matches!(byte, b'=' | b'!'))
+        else {
+            return Ok(Self::Bare(Atom::parse(value)?));
+        };
+
+        let rest = &value[1..];
+        let Some(separator) = rest.find(char::is_whitespace) else {
+            bail!("conditional expression requires a field followed by whitespace and a value");
+        };
+        let field = rest[..separator].parse::<Field>().map_err(|_| {
+            anyhow!(
+                "filter key '{}' is not a nullable Coffee column",
+                &rest[..separator]
+            )
+        })?;
+        let atom = rest[separator..].trim_start();
+        if atom.is_empty() {
+            bail!("conditional expression requires a value after the field");
+        }
+        let atom = Atom::parse(atom)?;
+        Ok(if condition == b'=' {
+            Self::IfDefined(field, atom)
+        } else {
+            Self::IfUndefined(field, atom)
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct CoffeeTemplate {
-    inner: mufmt::Template<String, Key>,
+    inner: mufmt::Template<String, Expression>,
 }
 
 impl CoffeeTemplate {
@@ -60,7 +180,7 @@ impl FromStr for CoffeeTemplate {
     type Err = anyhow::Error;
 
     fn from_str(value: &str) -> Result<Self> {
-        let inner = mufmt::Template::<String, Key>::compile(value)
+        let inner = mufmt::Template::<String, Expression>::compile(value)
             .map_err(|error| anyhow!(error.to_string()))?;
         Ok(Self { inner })
     }
@@ -68,56 +188,19 @@ impl FromStr for CoffeeTemplate {
 
 struct CoffeeManifest<'a>(&'a Coffee);
 
-enum Value<'a> {
-    Text(&'a str),
-    Label(crate::label::Label),
-    Date(Option<chrono::NaiveDate>),
-    Timestamp(&'a chrono::DateTime<chrono::Local>),
-    Flavours(&'a [String]),
-}
-
-impl fmt::Display for Value<'_> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Text(value) => formatter.write_str(value),
-            Self::Label(value) => value.fmt(formatter),
-            Self::Date(Some(value)) => value.fmt(formatter),
-            Self::Date(None) => Ok(()),
-            Self::Timestamp(value) => value.fmt(formatter),
-            Self::Flavours(flavours) => {
-                let mut flavours = flavours.iter();
-                if let Some(first) = flavours.next() {
-                    formatter.write_str(first)?;
-                    for flavour in flavours {
-                        write!(formatter, ", {flavour}")?;
-                    }
-                }
-                Ok(())
-            }
-        }
-    }
-}
-
-impl Manifest<Key> for CoffeeManifest<'_> {
+impl Manifest<Expression> for CoffeeManifest<'_> {
     type Error = Infallible;
 
-    fn manifest(&self, key: &Key) -> Result<impl fmt::Display, Self::Error> {
-        let coffee = self.0;
-        let value = match key {
-            Key::Label => Value::Label(coffee.label),
-            Key::Added => Value::Timestamp(&coffee.added),
-            Key::Name => Value::Text(&coffee.data.name),
-            Key::RoastDate => Value::Date(coffee.data.roast_date),
-            Key::Roaster => Value::Text(&coffee.data.roaster),
-            Key::Origin => Value::Text(coffee.data.origin.as_deref().unwrap_or("")),
-            Key::Producer => Value::Text(coffee.data.producer.as_deref().unwrap_or("")),
-            Key::Farm => Value::Text(coffee.data.farm.as_deref().unwrap_or("")),
-            Key::Elevation => Value::Text(coffee.data.elevation.as_deref().unwrap_or("")),
-            Key::Variety => Value::Text(coffee.data.variety.as_deref().unwrap_or("")),
-            Key::Process => Value::Text(coffee.data.process.as_deref().unwrap_or("")),
-            Key::Flavours => Value::Flavours(&coffee.data.flavours),
+    fn manifest(&self, expression: &Expression) -> Result<impl fmt::Display, Self::Error> {
+        let rendered = match expression {
+            Expression::Bare(atom) => atom.render(self.0),
+            Expression::IfDefined(field, atom) if field.is_defined(self.0) => atom.render(self.0),
+            Expression::IfUndefined(field, atom) if !field.is_defined(self.0) => {
+                atom.render(self.0)
+            }
+            Expression::IfDefined(..) | Expression::IfUndefined(..) => String::new(),
         };
-        Ok(value)
+        Ok(rendered)
     }
 }
 
@@ -129,16 +212,15 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn renders_fields_and_empty_options() {
-        let coffee = Coffee {
+    fn coffee(origin: Option<&str>) -> Coffee {
+        Coffee {
             label: crate::label::Label::new(CoffeeType::Filter, NonZero::new(1).unwrap()),
             added: chrono::Local::now(),
             data: CoffeeData {
                 name: "Lot One".into(),
                 roast_date: None,
                 roaster: "Roaster".into(),
-                origin: None,
+                origin: origin.map(str::to_owned),
                 producer: None,
                 farm: None,
                 elevation: None,
@@ -146,13 +228,57 @@ mod tests {
                 process: None,
                 flavours: vec!["apple".into(), "peach".into(), "mango".into()],
             },
-        };
-        let template: CoffeeTemplate = "{label} {name} {origin} {added} {%flavours}"
+        }
+    }
+
+    #[test]
+    fn renders_fields_and_meta_keys() {
+        let coffee = coffee(None);
+        let template: CoffeeTemplate = "{%label} {%name} {origin} {%added} {%flavours}"
             .parse()
             .unwrap();
         let rendered = template.render(&coffee).unwrap();
         assert!(rendered.starts_with("F1 Lot One  "));
         assert!(rendered.ends_with("apple, peach, mango"));
         assert!("{flavours}".parse::<CoffeeTemplate>().is_err());
+    }
+
+    #[test]
+    fn conditionally_renders_defined_and_undefined_fields() {
+        let template: CoffeeTemplate =
+            r#"{%name}{=origin ": "}{origin?}{!origin " (unknown origin)"}"#
+                .parse()
+                .unwrap();
+        assert_eq!(
+            template.render(&coffee(Some("Ethiopia"))).unwrap(),
+            "Lot One: Ethiopia"
+        );
+        assert_eq!(
+            template.render(&coffee(None)).unwrap(),
+            "Lot One (unknown origin)"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_filter_syntax() {
+        for template in [
+            "{=origin}",
+            "{=unknown value}",
+            "{=label value}",
+            "{=added value}",
+            "{=roaster value}",
+            "{=name value}",
+            "{%unknown}",
+            "{label}",
+            "{added}",
+            "{name}",
+            "{roaster}",
+            "{flavours}",
+        ] {
+            assert!(
+                template.parse::<CoffeeTemplate>().is_err(),
+                "accepted {template}"
+            );
+        }
     }
 }
