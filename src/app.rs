@@ -50,8 +50,11 @@ enum Command {
     /// List all coffees.
     List {
         /// Format template using Coffee column names as keys.
-        #[arg(short, long, default_value = DEFAULT_TEMPLATE)]
+        #[arg(short, long, default_value = DEFAULT_TEMPLATE, conflicts_with = "flavours")]
         template: CoffeeTemplate,
+        /// List registered flavours instead of coffees.
+        #[arg(long)]
+        flavours: bool,
     },
 }
 
@@ -77,14 +80,14 @@ impl Cli {
         match self.command {
             Command::Add { kind } => add(&mut database, kind),
             Command::Edit { label } => edit(&mut database, label),
-            Command::List { template } => list(&database, &template),
+            Command::List { template, flavours } => list(&database, &template, flavours),
         }
     }
 }
 
 fn add(database: &mut Database, kind: CoffeeType) -> Result<()> {
     let Some(mut data) = edit_record(CoffeeData::draft(), None)? else {
-        return Ok(());
+        bail!("no data was added");
     };
     loop {
         match resolve_roaster(database, &data.roaster)? {
@@ -96,7 +99,7 @@ fn add(database: &mut Database, kind: CoffeeType) -> Result<()> {
             RoasterChoice::Edit => {
                 let source = data.to_toml(None)?;
                 let Some(edited) = edit_record(&source, Some(&data))? else {
-                    return Ok(());
+                    bail!("no data was added");
                 };
                 data = edited;
             }
@@ -110,7 +113,7 @@ fn edit(database: &mut Database, label: Label) -> Result<()> {
     };
     let source = current.data.to_toml(Some(label))?;
     let Some(mut data) = edit_record(&source, Some(&current.data))? else {
-        return Ok(());
+        bail!("no data was changed");
     };
     loop {
         match resolve_roaster(database, &data.roaster)? {
@@ -122,7 +125,7 @@ fn edit(database: &mut Database, label: Label) -> Result<()> {
             RoasterChoice::Edit => {
                 let source = data.to_toml(Some(label))?;
                 let Some(edited) = edit_record(&source, Some(&data))? else {
-                    return Ok(());
+                    bail!("no data was changed");
                 };
                 data = edited;
             }
@@ -130,9 +133,15 @@ fn edit(database: &mut Database, label: Label) -> Result<()> {
     }
 }
 
-fn list(database: &Database, template: &CoffeeTemplate) -> Result<()> {
+fn list(database: &Database, template: &CoffeeTemplate, flavours: bool) -> Result<()> {
     let stdout = io::stdout();
     let mut output = stdout.lock();
+    if flavours {
+        for flavour in database.list_flavours()? {
+            writeln!(output, "{flavour}")?;
+        }
+        return Ok(());
+    }
     for coffee in database.list()? {
         writeln!(output, "{}", template.render(&coffee)?.trim_end())?;
     }

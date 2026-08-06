@@ -47,7 +47,17 @@ INSERT INTO Labels (type, short, count) VALUES
   ('Espresso', 'E', 0),
   ('Filter', 'F', 0),
   ('Omni', 'O', 0);
+
+CREATE INDEX Coffee_roaster_idx ON Coffee(roaster);
+CREATE INDEX CoffeeFlavours_flavour_idx ON CoffeeFlavours(flavour);
+CREATE INDEX Coffee_label_order_idx ON Coffee(
+  CASE substr(label, 1, 1) WHEN 'E' THEN 0 WHEN 'F' THEN 1 ELSE 2 END,
+  CAST(substr(label, 2) AS INTEGER)
+);
 "#;
+
+// First four bytes of SHA-256("coffeedb"), interpreted as a big-endian integer.
+const APPLICATION_ID: i32 = 0x75af_f574;
 
 pub struct Database {
     connection: Connection,
@@ -55,33 +65,50 @@ pub struct Database {
 
 impl Database {
     pub fn open(path: &Path) -> Result<Self> {
+        let is_new = !path
+            .try_exists()
+            .with_context(|| format!("failed to inspect database path '{}'", path.display()))?;
         let connection = Connection::open(path)
             .with_context(|| format!("failed to open database '{}'", path.display()))?;
-        connection.pragma_update(None, "foreign_keys", "ON")?;
-        let database = Self { connection };
-        database.initialize()?;
+        let mut database = Self { connection };
+        database.initialize(is_new)?;
+        database
+            .connection
+            .pragma_update(None, "foreign_keys", "ON")?;
         Ok(database)
     }
 
     #[cfg(test)]
     fn in_memory() -> Result<Self> {
         let connection = Connection::open_in_memory()?;
-        connection.pragma_update(None, "foreign_keys", "ON")?;
-        let database = Self { connection };
-        database.initialize()?;
+        let mut database = Self { connection };
+        database.initialize(true)?;
+        database
+            .connection
+            .pragma_update(None, "foreign_keys", "ON")?;
         Ok(database)
     }
 
-    fn initialize(&self) -> Result<()> {
-        let has_tables: bool = self.connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table')",
-            [],
-            |row| row.get(0),
-        )?;
-        if !has_tables {
-            self.connection.execute_batch(SCHEMA)?;
+    fn initialize(&mut self, is_new: bool) -> Result<()> {
+        if is_new {
+            let transaction = self.connection.transaction()?;
+            transaction.execute_batch(SCHEMA)?;
+            transaction.pragma_update(None, "application_id", APPLICATION_ID)?;
+            transaction.commit()?;
+            return Ok(());
         }
-        Ok(())
+
+        let application_id: i32 =
+            self.connection
+                .pragma_query_value(None, "application_id", |row| row.get(0))?;
+        match application_id {
+            APPLICATION_ID => Ok(()),
+            0 => bail!("database is not coffeedb-compatible: SQLite application_id is not set"),
+            found => bail!(
+                "database is not coffeedb-compatible: expected SQLite application_id \
+                 {APPLICATION_ID}, found {found}"
+            ),
+        }
     }
 
     pub fn roaster_url(&self, name: &str) -> Result<Option<Option<String>>> {
@@ -203,6 +230,15 @@ impl Database {
             })
             .collect()
     }
+
+    pub fn list_flavours(&self) -> Result<Vec<String>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT description FROM Flavours ORDER BY description")?;
+        Ok(statement
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
 }
 
 fn ensure_roaster(transaction: &Transaction<'_>, name: &str, url: Option<&str>) -> Result<()> {
@@ -302,6 +338,40 @@ mod tests {
         replacement.flavours = vec!["Cocoa".into()];
         database.update(coffee.label, replacement.clone(), None)?;
         assert_eq!(database.get(coffee.label)?.unwrap().data, replacement);
+        Ok(())
+    }
+
+    #[test]
+    fn lists_sorted_unique_flavours() -> Result<()> {
+        let mut database = Database::in_memory()?;
+        let mut first = data("First");
+        first.flavours = vec!["Lemon".into(), "Apple".into()];
+        database.add(CoffeeType::Filter, first, None)?;
+        let mut second = data("Second");
+        second.flavours = vec!["Apple".into(), "Cocoa".into()];
+        database.add(CoffeeType::Omni, second, None)?;
+
+        assert_eq!(database.list_flavours()?, ["Apple", "Cocoa", "Lemon"]);
+        Ok(())
+    }
+
+    #[test]
+    fn stamps_new_database_with_application_id() -> Result<()> {
+        let database = Database::in_memory()?;
+        let application_id: i32 =
+            database
+                .connection
+                .pragma_query_value(None, "application_id", |row| row.get(0))?;
+        assert_eq!(application_id, APPLICATION_ID);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_existing_database_without_application_id() -> Result<()> {
+        let connection = Connection::open_in_memory()?;
+        let mut database = Database { connection };
+        let error = database.initialize(false).unwrap_err();
+        assert!(error.to_string().contains("application_id is not set"));
         Ok(())
     }
 }
