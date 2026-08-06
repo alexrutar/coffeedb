@@ -16,6 +16,7 @@ enum Key {
     Origin,
     Producer,
     Farm,
+    Elevation,
     Variety,
     Process,
 }
@@ -32,6 +33,7 @@ impl Ast<'_> for Key {
             "origin" => Ok(Self::Origin),
             "producer" => Ok(Self::Producer),
             "farm" => Ok(Self::Farm),
+            "elevation" => Ok(Self::Elevation),
             "variety" => Ok(Self::Variety),
             "process" => Ok(Self::Process),
             _ => Err(anyhow!("unknown Coffee column '{expression}'")),
@@ -92,6 +94,7 @@ impl Manifest<Key> for CoffeeManifest<'_> {
             Key::Origin => Value::Text(coffee.data.origin.as_deref().unwrap_or("")),
             Key::Producer => Value::Text(coffee.data.producer.as_deref().unwrap_or("")),
             Key::Farm => Value::Text(coffee.data.farm.as_deref().unwrap_or("")),
+            Key::Elevation => Value::Text(coffee.data.elevation.as_deref().unwrap_or("")),
             Key::Variety => Value::Text(coffee.data.variety.as_deref().unwrap_or("")),
             Key::Process => Value::Text(coffee.data.process.as_deref().unwrap_or("")),
         };
@@ -118,6 +121,7 @@ mod tests {
                 origin: None,
                 producer: None,
                 farm: None,
+                elevation: None,
                 variety: None,
                 process: None,
                 flavours: Vec::new(),

@@ -22,6 +22,7 @@ CREATE TABLE Coffee (
   origin TEXT,
   producer TEXT,
   farm TEXT,
+  elevation TEXT,
   variety TEXT,
   process TEXT
 ) STRICT;
@@ -121,7 +122,7 @@ impl Database {
         let data = self
             .connection
             .query_row(
-                "SELECT name, roast_date, roaster, origin, producer, farm, variety, process
+                "SELECT name, roast_date, roaster, origin, producer, farm, elevation, variety, process
                  FROM Coffee WHERE label = ?1",
                 [label],
                 |row| {
@@ -132,8 +133,9 @@ impl Database {
                         origin: row.get(3)?,
                         producer: row.get(4)?,
                         farm: row.get(5)?,
-                        variety: row.get(6)?,
-                        process: row.get(7)?,
+                        elevation: row.get(6)?,
+                        variety: row.get(7)?,
+                        process: row.get(8)?,
                         flavours: Vec::new(),
                     })
                 },
@@ -161,7 +163,7 @@ impl Database {
         ensure_roaster(&transaction, &data.roaster, new_roaster_url)?;
         let changed = transaction.execute(
             "UPDATE Coffee SET name=?2, roast_date=?3, roaster=?4, origin=?5,
-             producer=?6, farm=?7, variety=?8, process=?9 WHERE label=?1",
+             producer=?6, farm=?7, elevation=?8, variety=?9, process=?10 WHERE label=?1",
             params![
                 label,
                 data.name,
@@ -170,6 +172,7 @@ impl Database {
                 data.origin,
                 data.producer,
                 data.farm,
+                data.elevation,
                 data.variety,
                 data.process
             ],
@@ -213,8 +216,8 @@ fn ensure_roaster(transaction: &Transaction<'_>, name: &str, url: Option<&str>) 
 fn insert_coffee(transaction: &Transaction<'_>, label: Label, data: &CoffeeData) -> Result<()> {
     transaction.execute(
         "INSERT INTO Coffee
-         (label, name, roast_date, roaster, origin, producer, farm, variety, process)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+         (label, name, roast_date, roaster, origin, producer, farm, elevation, variety, process)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             label,
             data.name,
@@ -223,6 +226,7 @@ fn insert_coffee(transaction: &Transaction<'_>, label: Label, data: &CoffeeData)
             data.origin,
             data.producer,
             data.farm,
+            data.elevation,
             data.variety,
             data.process
         ],
@@ -256,6 +260,7 @@ mod tests {
             origin: None,
             producer: None,
             farm: None,
+            elevation: None,
             variety: None,
             process: None,
             flavours: vec!["Apple".into()],

@@ -26,6 +26,8 @@ pub struct CoffeeData {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub farm: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elevation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variety: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process: Option<String>,
@@ -45,6 +47,7 @@ impl CoffeeData {
             ("origin", &self.origin),
             ("producer", &self.producer),
             ("farm", &self.farm),
+            ("elevation", &self.elevation),
             ("variety", &self.variety),
             ("process", &self.process),
         ] {
@@ -83,6 +86,7 @@ roaster = ""
 origin = ""
 producer = ""
 farm = ""
+elevation = ""
 variety = ""
 process = ""
 flavours = []
