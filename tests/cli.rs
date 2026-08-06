@@ -46,6 +46,36 @@ fn invalid_add_aborted_by_user_exits_with_error() -> Result<()> {
 }
 
 #[test]
+fn duplicate_flavours_return_to_editor() -> Result<()> {
+    let directory = TempDir::new()?;
+    let database = directory.path().join("coffeedb.db");
+    let record = directory.path().join("duplicates.toml");
+    std::fs::write(
+        &record,
+        r#"name = "Test Coffee"
+roaster = "Test Roaster"
+flavours = ["Apple", "apple"]
+"#,
+    )?;
+
+    Command::cargo_bin("coffeedb")?
+        .args(["--database", database.to_str().unwrap(), "add", "filter"])
+        .env("EDITOR", format!("cp {}", record.display()))
+        .write_stdin("n\n")
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(
+            predicate::str::contains("duplicate flavour 'apple'")
+                .and(predicate::str::contains("Continue editing?"))
+                .and(predicate::str::contains("no data was added")),
+        );
+
+    directory.close()?;
+    Ok(())
+}
+
+#[test]
 fn cancelled_edit_exits_with_error() -> Result<()> {
     let directory = TempDir::new()?;
     let database = directory.path().join("coffeedb.db");
@@ -87,7 +117,7 @@ fn lists_registered_flavours() -> Result<()> {
         &record,
         r#"name = "Test Coffee"
 roaster = "Test Roaster"
-flavours = ["Lemon", "Apple", "Apple"]
+flavours = ["Lemon", "Apple"]
 "#,
     )?;
 

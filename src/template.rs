@@ -1,7 +1,7 @@
 use std::{convert::Infallible, fmt, str::FromStr};
 
 use anyhow::{Result, anyhow};
-use mufmt::{Ast, Manifest, Span};
+use mufmt::{Ast, Manifest};
 
 use crate::record::Coffee;
 
@@ -51,13 +51,6 @@ pub struct CoffeeTemplate {
 }
 
 impl CoffeeTemplate {
-    pub fn uses_flavours(&self) -> bool {
-        self.inner
-            .spans()
-            .iter()
-            .any(|span| matches!(span, Span::Expr(Key::Flavours)))
-    }
-
     pub fn render(&self, coffee: &Coffee) -> Result<String> {
         Ok(self.inner.render(&CoffeeManifest(coffee))?)
     }
@@ -157,11 +150,9 @@ mod tests {
         let template: CoffeeTemplate = "{label} {name} {origin} {added} {%flavours}"
             .parse()
             .unwrap();
-        assert!(template.uses_flavours());
         let rendered = template.render(&coffee).unwrap();
         assert!(rendered.starts_with("F1 Lot One  "));
         assert!(rendered.ends_with("apple, peach, mango"));
-        assert!(!"{name}".parse::<CoffeeTemplate>().unwrap().uses_flavours());
         assert!("{flavours}".parse::<CoffeeTemplate>().is_err());
     }
 }

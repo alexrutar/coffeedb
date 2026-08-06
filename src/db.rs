@@ -3,7 +3,7 @@ use std::{num::NonZero, path::Path};
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Local};
 use rusqlite::{
-    Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
+    Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params, types::Type,
 };
 use url::Url;
 
@@ -29,17 +29,12 @@ CREATE TABLE Coffee (
   farm TEXT,
   elevation TEXT,
   variety TEXT,
-  process TEXT
+  process TEXT,
+  flavours TEXT NOT NULL CHECK (json_valid(flavours))
 ) STRICT;
 
 CREATE TABLE Flavours (
   description TEXT NOT NULL PRIMARY KEY
-) STRICT;
-
-CREATE TABLE CoffeeFlavours (
-  coffee TEXT NOT NULL REFERENCES Coffee(label) ON DELETE CASCADE,
-  flavour TEXT NOT NULL REFERENCES Flavours(description),
-  PRIMARY KEY (coffee, flavour)
 ) STRICT;
 
 CREATE TABLE Labels (
@@ -54,7 +49,6 @@ INSERT INTO Labels (type, short, count) VALUES
   ('Omni', 'O', 0);
 
 CREATE INDEX Coffee_roaster_idx ON Coffee(roaster);
-CREATE INDEX CoffeeFlavours_flavour_idx ON CoffeeFlavours(flavour);
 CREATE INDEX Coffee_label_order_idx ON Coffee(
   CASE substr(label, 1, 1) WHEN 'E' THEN 0 WHEN 'F' THEN 1 ELSE 2 END,
   CAST(substr(label, 2) AS INTEGER)
@@ -167,40 +161,42 @@ impl Database {
     }
 
     pub fn get(&self, label: Label) -> Result<Option<Coffee>> {
-        let row = self
-            .connection
-            .query_row(
-                "SELECT added, name, roast_date, roaster, origin, producer, farm, elevation, variety, process
+        let row =
+            self.connection
+                .query_row(
+                    "SELECT added, name, roast_date, roaster, origin, producer, farm, elevation,
+                        variety, process, flavours
                  FROM Coffee WHERE label = ?1",
-                [label],
-                |row| {
-                    Ok((
-                        row.get::<_, DateTime<Local>>(0)?,
-                        CoffeeData {
-                            name: row.get(1)?,
-                            roast_date: row.get(2)?,
-                            roaster: row.get(3)?,
-                            origin: row.get(4)?,
-                            producer: row.get(5)?,
-                            farm: row.get(6)?,
-                            elevation: row.get(7)?,
-                            variety: row.get(8)?,
-                            process: row.get(9)?,
-                            flavours: Vec::new(),
-                        },
-                    ))
-                },
-            )
-            .optional()?;
-        let Some((added, mut data)) = row else {
+                    [label],
+                    |row| {
+                        Ok((
+                            row.get::<_, DateTime<Local>>(0)?,
+                            CoffeeData {
+                                name: row.get(1)?,
+                                roast_date: row.get(2)?,
+                                roaster: row.get(3)?,
+                                origin: row.get(4)?,
+                                producer: row.get(5)?,
+                                farm: row.get(6)?,
+                                elevation: row.get(7)?,
+                                variety: row.get(8)?,
+                                process: row.get(9)?,
+                                flavours: serde_json::from_str(&row.get::<_, String>(10)?)
+                                    .map_err(|error| {
+                                        rusqlite::Error::FromSqlConversionFailure(
+                                            10,
+                                            Type::Text,
+                                            Box::new(error),
+                                        )
+                                    })?,
+                            },
+                        ))
+                    },
+                )
+                .optional()?;
+        let Some((added, data)) = row else {
             return Ok(None);
         };
-        let mut statement = self
-            .connection
-            .prepare("SELECT flavour FROM CoffeeFlavours WHERE coffee = ?1 ORDER BY rowid")?;
-        data.flavours = statement
-            .query_map([label], |row| row.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
         Ok(Some(Coffee { label, added, data }))
     }
 
@@ -221,9 +217,11 @@ impl Database {
             .optional()?
             .ok_or_else(|| anyhow!("coffee '{label}' does not exist"))?;
         ensure_roaster(&transaction, &data.roaster, new_roaster_url)?;
+        let flavours = serde_json::to_string(&data.flavours)?;
         let changed = transaction.execute(
             "UPDATE Coffee SET name=?2, roast_date=?3, roaster=?4, origin=?5,
-             producer=?6, farm=?7, elevation=?8, variety=?9, process=?10 WHERE label=?1",
+             producer=?6, farm=?7, elevation=?8, variety=?9, process=?10,
+             flavours=?11 WHERE label=?1",
             params![
                 label,
                 data.name,
@@ -234,44 +232,30 @@ impl Database {
                 data.farm,
                 data.elevation,
                 data.variety,
-                data.process
+                data.process,
+                flavours
             ],
         )?;
         debug_assert_eq!(changed, 1);
-        transaction.execute("DELETE FROM CoffeeFlavours WHERE coffee = ?1", [label])?;
-        insert_flavours(&transaction, label, &data.flavours)?;
+        register_flavours(&transaction, &data.flavours)?;
         transaction.commit()?;
         Ok(Coffee { label, added, data })
     }
 
-    pub fn list(&self, include_flavours: bool) -> Result<Vec<Coffee>> {
-        const WITHOUT_FLAVOURS: &str =
+    pub fn list(&self) -> Result<Vec<Coffee>> {
+        let mut statement = self.connection.prepare(
             "SELECT label, added, name, roast_date, roaster, origin, producer, farm,
-                    elevation, variety, process, NULL
+                    elevation, variety, process, flavours
              FROM Coffee
              ORDER BY CASE substr(label, 1, 1) WHEN 'E' THEN 0 WHEN 'F' THEN 1 ELSE 2 END,
-                      CAST(substr(label, 2) AS INTEGER)";
-        const WITH_FLAVOURS: &str =
-            "SELECT c.label, c.added, c.name, c.roast_date, c.roaster, c.origin, c.producer,
-                    c.farm, c.elevation, c.variety, c.process, f.joined_flavours
-             FROM Coffee AS c
-             LEFT JOIN (
-                 SELECT coffee, group_concat(flavour, ', ') AS joined_flavours
-                 FROM (SELECT coffee, flavour FROM CoffeeFlavours ORDER BY rowid)
-                 GROUP BY coffee
-             ) AS f ON f.coffee = c.label
-             ORDER BY CASE substr(c.label, 1, 1) WHEN 'E' THEN 0 WHEN 'F' THEN 1 ELSE 2 END,
-                      CAST(substr(c.label, 2) AS INTEGER)";
-
-        let sql = if include_flavours {
-            WITH_FLAVOURS
-        } else {
-            WITHOUT_FLAVOURS
-        };
-        let mut statement = self.connection.prepare(sql)?;
+                      CAST(substr(label, 2) AS INTEGER)",
+        )?;
         Ok(statement
             .query_map([], |row| {
-                let flavours: Option<String> = row.get(11)?;
+                let flavours =
+                    serde_json::from_str(&row.get::<_, String>(11)?).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(11, Type::Text, Box::new(error))
+                    })?;
                 Ok(Coffee {
                     label: row.get(0)?,
                     added: row.get(1)?,
@@ -285,9 +269,7 @@ impl Database {
                         elevation: row.get(8)?,
                         variety: row.get(9)?,
                         process: row.get(10)?,
-                        flavours: flavours
-                            .map(|value| value.split(", ").map(str::to_owned).collect())
-                            .unwrap_or_default(),
+                        flavours,
                     },
                 })
             })?
@@ -318,10 +300,12 @@ fn insert_coffee(
     added: &DateTime<Local>,
     data: &CoffeeData,
 ) -> Result<()> {
+    let flavours = serde_json::to_string(&data.flavours)?;
     transaction.execute(
         "INSERT INTO Coffee
-         (label, added, name, roast_date, roaster, origin, producer, farm, elevation, variety, process)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+         (label, added, name, roast_date, roaster, origin, producer, farm, elevation, variety,
+          process, flavours)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             label,
             added,
@@ -333,21 +317,18 @@ fn insert_coffee(
             data.farm,
             data.elevation,
             data.variety,
-            data.process
+            data.process,
+            flavours
         ],
     )?;
-    insert_flavours(transaction, label, &data.flavours)
+    register_flavours(transaction, &data.flavours)
 }
 
-fn insert_flavours(transaction: &Transaction<'_>, label: Label, flavours: &[String]) -> Result<()> {
+fn register_flavours(transaction: &Transaction<'_>, flavours: &[String]) -> Result<()> {
     for flavour in flavours {
         transaction.execute(
             "INSERT OR IGNORE INTO Flavours (description) VALUES (?1)",
             [flavour],
-        )?;
-        transaction.execute(
-            "INSERT INTO CoffeeFlavours (coffee, flavour) VALUES (?1, ?2)",
-            params![label, flavour],
         )?;
     }
     Ok(())
@@ -444,15 +425,16 @@ mod tests {
         database.add(CoffeeType::Omni, second, None)?;
 
         assert_eq!(database.list_flavours()?, ["apple", "cocoa", "lemon"]);
-        assert!(
-            database
-                .list(false)?
-                .iter()
-                .all(|coffee| coffee.data.flavours.is_empty())
-        );
-        let coffees = database.list(true)?;
+        let coffees = database.list()?;
         assert_eq!(coffees[0].data.flavours, ["lemon", "apple"]);
         assert_eq!(coffees[1].data.flavours, ["apple", "cocoa"]);
+        let (storage_type, json): (String, String) = database.connection.query_row(
+            "SELECT typeof(flavours), json(flavours) FROM Coffee WHERE label = 'F1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(storage_type, "text");
+        assert_eq!(json, r#"["lemon","apple"]"#);
         Ok(())
     }
 

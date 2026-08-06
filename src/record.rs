@@ -71,9 +71,10 @@ impl CoffeeData {
                 bail!("flavour '{flavour}' may contain only ASCII letters and spaces");
             }
             let flavour = flavour.to_ascii_lowercase();
-            if seen.insert(flavour.clone()) {
-                flavours.push(flavour);
+            if !seen.insert(flavour.clone()) {
+                bail!("duplicate flavour '{flavour}'; remove duplicate flavours");
             }
+            flavours.push(flavour);
         }
         self.flavours = flavours;
         Ok(self)
@@ -127,17 +128,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn normalizes_and_deduplicates_flavours() {
-        let mut data: CoffeeData = r#"
+    fn normalizes_flavours_and_rejects_duplicates() {
+        let data: CoffeeData = r#"
 name = "Coffee"
 roaster = "Roaster"
-flavours = ["  Apple ", "apple", "Brown Sugar"]
+flavours = ["  Apple ", "Brown Sugar"]
 "#
         .parse()
         .unwrap();
         assert_eq!(data.flavours, ["apple", "brown sugar"]);
-        data.flavours.push("cocoa-nib".into());
-        assert!(data.validate().is_err());
+        assert!(
+            r#"name = "Coffee"
+roaster = "Roaster"
+flavours = ["Apple", "apple"]
+"#
+            .parse::<CoffeeData>()
+            .is_err()
+        );
     }
 
     #[test]
