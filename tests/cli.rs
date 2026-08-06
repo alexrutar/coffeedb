@@ -209,3 +209,22 @@ flavours = []
     directory.close()?;
     Ok(())
 }
+
+#[test]
+fn generates_hidden_shell_completions_without_opening_database() -> Result<()> {
+    Command::cargo_bin("coffeedb")?
+        .args(["completions", "bash"])
+        .env("COFFEEDB_DATABASE_PATH", "/this/path/must/not/be/opened.db")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("_coffeedb"))
+        .stderr(predicate::str::is_empty());
+
+    Command::cargo_bin("coffeedb")?
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("completions").not());
+
+    Ok(())
+}

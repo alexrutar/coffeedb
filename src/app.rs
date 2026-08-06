@@ -6,7 +6,8 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::aot::{Shell, generate};
 use etcetera::{AppStrategy, AppStrategyArgs, choose_app_strategy};
 use url::Url;
 
@@ -57,10 +58,23 @@ enum Command {
         #[arg(long)]
         flavours: bool,
     },
+    /// Generate a shell completion script.
+    #[command(hide = true)]
+    Completions {
+        /// Shell for which to generate completions.
+        shell: Shell,
+    },
 }
 
 impl Cli {
     pub fn run(self) -> Result<()> {
+        if let Command::Completions { shell } = self.command {
+            let mut command = Self::command();
+            let name = command.get_name().to_owned();
+            generate(shell, &mut command, name, &mut io::stdout().lock());
+            return Ok(());
+        }
+
         let path = match self.database {
             Some(path) => path,
             None => {
@@ -82,6 +96,7 @@ impl Cli {
             Command::Add { kind } => add(&mut database, kind),
             Command::Edit { label } => edit(&mut database, label),
             Command::List { template, flavours } => list(&database, &template, flavours),
+            Command::Completions { .. } => unreachable!(),
         }
     }
 }
