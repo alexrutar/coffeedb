@@ -244,22 +244,54 @@ impl Database {
         Ok(Coffee { label, added, data })
     }
 
-    pub fn list(&self) -> Result<Vec<Coffee>> {
-        let mut statement = self.connection.prepare(
-            "SELECT label FROM Coffee
+    pub fn list(&self, include_flavours: bool) -> Result<Vec<Coffee>> {
+        const WITHOUT_FLAVOURS: &str =
+            "SELECT label, added, name, roast_date, roaster, origin, producer, farm,
+                    elevation, variety, process, NULL
+             FROM Coffee
              ORDER BY CASE substr(label, 1, 1) WHEN 'E' THEN 0 WHEN 'F' THEN 1 ELSE 2 END,
-                      CAST(substr(label, 2) AS INTEGER)",
-        )?;
-        let labels = statement
-            .query_map([], |row| row.get(0))?
-            .collect::<rusqlite::Result<Vec<Label>>>()?;
-        labels
-            .into_iter()
-            .map(|label| {
-                self.get(label)?
-                    .ok_or_else(|| anyhow!("coffee '{label}' disappeared while listing"))
-            })
-            .collect()
+                      CAST(substr(label, 2) AS INTEGER)";
+        const WITH_FLAVOURS: &str =
+            "SELECT c.label, c.added, c.name, c.roast_date, c.roaster, c.origin, c.producer,
+                    c.farm, c.elevation, c.variety, c.process, f.joined_flavours
+             FROM Coffee AS c
+             LEFT JOIN (
+                 SELECT coffee, group_concat(flavour, ', ') AS joined_flavours
+                 FROM (SELECT coffee, flavour FROM CoffeeFlavours ORDER BY rowid)
+                 GROUP BY coffee
+             ) AS f ON f.coffee = c.label
+             ORDER BY CASE substr(c.label, 1, 1) WHEN 'E' THEN 0 WHEN 'F' THEN 1 ELSE 2 END,
+                      CAST(substr(c.label, 2) AS INTEGER)";
+
+        let sql = if include_flavours {
+            WITH_FLAVOURS
+        } else {
+            WITHOUT_FLAVOURS
+        };
+        let mut statement = self.connection.prepare(sql)?;
+        Ok(statement
+            .query_map([], |row| {
+                let flavours: Option<String> = row.get(11)?;
+                Ok(Coffee {
+                    label: row.get(0)?,
+                    added: row.get(1)?,
+                    data: CoffeeData {
+                        name: row.get(2)?,
+                        roast_date: row.get(3)?,
+                        roaster: row.get(4)?,
+                        origin: row.get(5)?,
+                        producer: row.get(6)?,
+                        farm: row.get(7)?,
+                        elevation: row.get(8)?,
+                        variety: row.get(9)?,
+                        process: row.get(10)?,
+                        flavours: flavours
+                            .map(|value| value.split(", ").map(str::to_owned).collect())
+                            .unwrap_or_default(),
+                    },
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn list_flavours(&self) -> Result<Vec<String>> {
@@ -412,6 +444,15 @@ mod tests {
         database.add(CoffeeType::Omni, second, None)?;
 
         assert_eq!(database.list_flavours()?, ["apple", "cocoa", "lemon"]);
+        assert!(
+            database
+                .list(false)?
+                .iter()
+                .all(|coffee| coffee.data.flavours.is_empty())
+        );
+        let coffees = database.list(true)?;
+        assert_eq!(coffees[0].data.flavours, ["lemon", "apple"]);
+        assert_eq!(coffees[1].data.flavours, ["apple", "cocoa"]);
         Ok(())
     }
 

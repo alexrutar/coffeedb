@@ -110,6 +110,19 @@ flavours = ["Lemon", "Apple", "Apple"]
         .stdout("apple\nlemon\n")
         .stderr(predicate::str::is_empty());
 
+    Command::cargo_bin("coffeedb")?
+        .args([
+            "--database",
+            database.to_str().unwrap(),
+            "list",
+            "--template",
+            "{%flavours}",
+        ])
+        .assert()
+        .success()
+        .stdout("lemon, apple\n")
+        .stderr(predicate::str::is_empty());
+
     directory.close()?;
     Ok(())
 }

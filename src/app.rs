@@ -143,7 +143,7 @@ fn list(database: &Database, template: &CoffeeTemplate, flavours: bool) -> Resul
         }
         return Ok(());
     }
-    for coffee in database.list()? {
+    for coffee in database.list(template.uses_flavours())? {
         writeln!(output, "{}", template.render(&coffee)?.trim_end())?;
     }
     Ok(())

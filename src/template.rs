@@ -1,7 +1,7 @@
 use std::{convert::Infallible, fmt, str::FromStr};
 
 use anyhow::{Result, anyhow};
-use mufmt::{Ast, Manifest};
+use mufmt::{Ast, Manifest, Span};
 
 use crate::record::Coffee;
 
@@ -20,6 +20,7 @@ enum Key {
     Elevation,
     Variety,
     Process,
+    Flavours,
 }
 
 impl Ast<'_> for Key {
@@ -38,6 +39,7 @@ impl Ast<'_> for Key {
             "elevation" => Ok(Self::Elevation),
             "variety" => Ok(Self::Variety),
             "process" => Ok(Self::Process),
+            "%flavours" => Ok(Self::Flavours),
             _ => Err(anyhow!("unknown Coffee column '{expression}'")),
         }
     }
@@ -49,6 +51,13 @@ pub struct CoffeeTemplate {
 }
 
 impl CoffeeTemplate {
+    pub fn uses_flavours(&self) -> bool {
+        self.inner
+            .spans()
+            .iter()
+            .any(|span| matches!(span, Span::Expr(Key::Flavours)))
+    }
+
     pub fn render(&self, coffee: &Coffee) -> Result<String> {
         Ok(self.inner.render(&CoffeeManifest(coffee))?)
     }
@@ -71,6 +80,7 @@ enum Value<'a> {
     Label(crate::label::Label),
     Date(Option<chrono::NaiveDate>),
     Timestamp(&'a chrono::DateTime<chrono::Local>),
+    Flavours(&'a [String]),
 }
 
 impl fmt::Display for Value<'_> {
@@ -81,6 +91,16 @@ impl fmt::Display for Value<'_> {
             Self::Date(Some(value)) => value.fmt(formatter),
             Self::Date(None) => Ok(()),
             Self::Timestamp(value) => value.fmt(formatter),
+            Self::Flavours(flavours) => {
+                let mut flavours = flavours.iter();
+                if let Some(first) = flavours.next() {
+                    formatter.write_str(first)?;
+                    for flavour in flavours {
+                        write!(formatter, ", {flavour}")?;
+                    }
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -102,6 +122,7 @@ impl Manifest<Key> for CoffeeManifest<'_> {
             Key::Elevation => Value::Text(coffee.data.elevation.as_deref().unwrap_or("")),
             Key::Variety => Value::Text(coffee.data.variety.as_deref().unwrap_or("")),
             Key::Process => Value::Text(coffee.data.process.as_deref().unwrap_or("")),
+            Key::Flavours => Value::Flavours(&coffee.data.flavours),
         };
         Ok(value)
     }
@@ -130,13 +151,17 @@ mod tests {
                 elevation: None,
                 variety: None,
                 process: None,
-                flavours: Vec::new(),
+                flavours: vec!["apple".into(), "peach".into(), "mango".into()],
             },
         };
-        let template: CoffeeTemplate = "{label} {name} {origin} {added}".parse().unwrap();
+        let template: CoffeeTemplate = "{label} {name} {origin} {added} {%flavours}"
+            .parse()
+            .unwrap();
+        assert!(template.uses_flavours());
         let rendered = template.render(&coffee).unwrap();
         assert!(rendered.starts_with("F1 Lot One  "));
-        assert!(rendered.ends_with(&coffee.added.to_string()));
+        assert!(rendered.ends_with("apple, peach, mango"));
+        assert!(!"{name}".parse::<CoffeeTemplate>().unwrap().uses_flavours());
         assert!("{flavours}".parse::<CoffeeTemplate>().is_err());
     }
 }
