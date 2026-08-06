@@ -126,6 +126,7 @@ impl Database {
         data: CoffeeData,
         new_roaster_url: Option<&str>,
     ) -> Result<Coffee> {
+        let data = data.validate()?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -186,6 +187,7 @@ impl Database {
         data: CoffeeData,
         new_roaster_url: Option<&str>,
     ) -> Result<Coffee> {
+        let data = data.validate()?;
         let transaction = self.connection.transaction()?;
         ensure_roaster(&transaction, &data.roaster, new_roaster_url)?;
         let changed = transaction.execute(
@@ -335,7 +337,7 @@ mod tests {
         let mut database = Database::in_memory()?;
         let coffee = database.add(CoffeeType::Omni, data("Old"), Some("https://example.com"))?;
         let mut replacement = data("New");
-        replacement.flavours = vec!["Cocoa".into()];
+        replacement.flavours = vec!["cocoa".into()];
         database.update(coffee.label, replacement.clone(), None)?;
         assert_eq!(database.get(coffee.label)?.unwrap().data, replacement);
         Ok(())
@@ -351,7 +353,7 @@ mod tests {
         second.flavours = vec!["Apple".into(), "Cocoa".into()];
         database.add(CoffeeType::Omni, second, None)?;
 
-        assert_eq!(database.list_flavours()?, ["Apple", "Cocoa", "Lemon"]);
+        assert_eq!(database.list_flavours()?, ["apple", "cocoa", "lemon"]);
         Ok(())
     }
 

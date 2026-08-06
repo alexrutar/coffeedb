@@ -59,7 +59,7 @@ impl CoffeeData {
         let mut seen = HashSet::new();
         let mut flavours = Vec::with_capacity(self.flavours.len());
         for raw in self.flavours {
-            let flavour = raw.trim_matches(' ').to_owned();
+            let flavour = raw.trim_matches(' ');
             if flavour.is_empty() {
                 bail!("flavours must not be empty");
             }
@@ -69,6 +69,7 @@ impl CoffeeData {
             {
                 bail!("flavour '{flavour}' may contain only ASCII letters and spaces");
             }
+            let flavour = flavour.to_ascii_lowercase();
             if seen.insert(flavour.clone()) {
                 flavours.push(flavour);
             }
@@ -129,13 +130,32 @@ mod tests {
         let mut data: CoffeeData = r#"
 name = "Coffee"
 roaster = "Roaster"
-flavours = ["  Apple ", "Apple", "Brown Sugar"]
+flavours = ["  Apple ", "apple", "Brown Sugar"]
 "#
         .parse()
         .unwrap();
-        assert_eq!(data.flavours, ["Apple", "Brown Sugar"]);
+        assert_eq!(data.flavours, ["apple", "brown sugar"]);
         data.flavours.push("cocoa-nib".into());
         assert!(data.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_non_ascii_letters_and_whitespace() {
+        for flavour in ["café", "brown\tsugar", "cocoa 70"] {
+            let data = CoffeeData {
+                name: "Coffee".into(),
+                roast_date: None,
+                roaster: "Roaster".into(),
+                origin: None,
+                producer: None,
+                farm: None,
+                elevation: None,
+                variety: None,
+                process: None,
+                flavours: vec![flavour.into()],
+            };
+            assert!(data.validate().is_err(), "accepted {flavour}");
+        }
     }
 
     #[test]

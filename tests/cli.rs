@@ -107,7 +107,7 @@ flavours = ["Lemon", "Apple", "Apple"]
         ])
         .assert()
         .success()
-        .stdout("Apple\nLemon\n")
+        .stdout("apple\nlemon\n")
         .stderr(predicate::str::is_empty());
 
     directory.close()?;
