@@ -1,10 +1,11 @@
-use std::{num::NonZero, path::Path};
+use std::{fmt, num::NonZero, path::Path, str::FromStr};
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Local};
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params, types::Type,
 };
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use url::Url;
 
 use crate::{
@@ -57,6 +58,92 @@ CREATE INDEX Coffee_label_order_idx ON Coffee(
 
 // First four bytes of SHA-256("coffeedb"), interpreted as a big-endian integer.
 const APPLICATION_ID: i32 = 0x75af_f574;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoffeeElevation {
+    Single(u16),
+    Range(u16, u16),
+}
+
+impl FromStr for CoffeeElevation {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        fn parse_half(value: &str) -> Result<(u16, bool)> {
+            let parts: Vec<_> = value.split_whitespace().collect();
+            if parts.len() != 1 && parts.len() != 2 {
+                bail!("invalid elevation");
+            }
+            if parts.get(1).is_some_and(|unit| *unit != "masl") {
+                bail!("invalid elevation");
+            }
+            let number = parts[0]
+                .parse::<u16>()
+                .map_err(|_| anyhow!("invalid elevation: '{}' does not fit in a u16", parts[0]))?;
+            Ok((number, parts.len() == 2))
+        }
+
+        let halves: Vec<_> = value.split('-').map(str::trim).collect();
+        match halves.as_slice() {
+            [single] => Ok(Self::Single(parse_half(single)?.0)),
+            [start, end] => {
+                let (start, start_has_unit) = parse_half(start)?;
+                let (end, end_has_unit) = parse_half(end)?;
+                if start_has_unit && !end_has_unit {
+                    bail!("invalid elevation");
+                }
+                Ok(Self::Range(start, end))
+            }
+            _ => bail!("invalid elevation"),
+        }
+    }
+}
+
+impl fmt::Display for CoffeeElevation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Single(value) => write!(formatter, "{value} masl"),
+            Self::Range(start, end) => write!(formatter, "{start} - {end} masl"),
+        }
+    }
+}
+
+impl Serialize for CoffeeElevation {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for CoffeeElevation {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl rusqlite::types::ToSql for CoffeeElevation {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        Ok(self.to_string().into())
+    }
+}
+
+impl rusqlite::types::FromSql for CoffeeElevation {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        value.as_str()?.parse().map_err(|error: anyhow::Error| {
+            rusqlite::types::FromSqlError::Other(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                error.to_string(),
+            )))
+        })
+    }
+}
 
 pub struct Database {
     connection: Connection,
@@ -362,6 +449,37 @@ mod tests {
             variety: None,
             process: None,
             flavours: vec!["Apple".into()],
+        }
+    }
+
+    #[test]
+    fn parses_supported_elevation_formats() {
+        for (value, expected) in [
+            ("1000", CoffeeElevation::Single(1000)),
+            ("1000 masl", CoffeeElevation::Single(1000)),
+            ("1000 - 1200", CoffeeElevation::Range(1000, 1200)),
+            ("1000 masl - 1200 masl", CoffeeElevation::Range(1000, 1200)),
+            ("1000 - 1200 masl", CoffeeElevation::Range(1000, 1200)),
+        ] {
+            assert_eq!(value.parse::<CoffeeElevation>().unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn rejects_unsupported_elevation_formats() {
+        for value in [
+            "",
+            "1000 m",
+            "1000masl",
+            "1000 masl - 1200",
+            "1000 - 1200 meters",
+            "1000 - 1200 - 1300",
+            "65536",
+        ] {
+            assert!(
+                value.parse::<CoffeeElevation>().is_err(),
+                "accepted {value}"
+            );
         }
     }
 

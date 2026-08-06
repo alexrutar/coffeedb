@@ -4,7 +4,7 @@ use anyhow::{Result, bail};
 use chrono::{DateTime, Local, NaiveDate};
 use serde::{Deserialize, Serialize};
 
-use crate::label::Label;
+use crate::{db::CoffeeElevation, label::Label};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Coffee {
@@ -27,7 +27,7 @@ pub struct CoffeeData {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub farm: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub elevation: Option<String>,
+    pub elevation: Option<CoffeeElevation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variety: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -48,7 +48,6 @@ impl CoffeeData {
             ("origin", &self.origin),
             ("producer", &self.producer),
             ("farm", &self.farm),
-            ("elevation", &self.elevation),
             ("variety", &self.variety),
             ("process", &self.process),
         ] {

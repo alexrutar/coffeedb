@@ -17,6 +17,7 @@ use crate::{
     db::Database,
     edit::{Builder, edit_with_builder},
     label::{CoffeeType, Label},
+    print::render_svg,
     record::CoffeeData,
     template::{CoffeeTemplate, DEFAULT_TEMPLATE},
 };
@@ -61,6 +62,12 @@ enum Command {
         #[arg(long)]
         flavours: bool,
     },
+    /// Print a card for an existing coffee as SVG.
+    Print {
+        /// Coffee label, such as F3.
+        #[arg(add = ArgValueCompleter::new(complete_labels))]
+        label: Label,
+    },
 }
 
 impl Cli {
@@ -76,6 +83,7 @@ impl Cli {
             Command::Add { kind } => add(&mut database, kind),
             Command::Edit { label } => edit(&mut database, label),
             Command::List { template, flavours } => list(&database, &template, flavours),
+            Command::Print { label } => print_card(&database, label),
         }
     }
 }
@@ -205,6 +213,15 @@ fn list(database: &Database, template: &CoffeeTemplate, flavours: bool) -> Resul
     for coffee in database.list()? {
         writeln!(output, "{}", template.render(&coffee)?.trim_end())?;
     }
+    Ok(())
+}
+
+fn print_card(database: &Database, label: Label) -> Result<()> {
+    let Some(coffee) = database.get(label)? else {
+        bail!("coffee '{label}' does not exist");
+    };
+    let stdout = io::stdout();
+    write!(stdout.lock(), "{}", render_svg(&coffee))?;
     Ok(())
 }
 

@@ -2,6 +2,7 @@ mod app;
 mod db;
 mod edit;
 mod label;
+mod print;
 mod record;
 mod template;
 

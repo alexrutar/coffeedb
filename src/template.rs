@@ -61,7 +61,10 @@ impl Field {
             Self::Origin => formatter.write_str(coffee.data.origin.as_deref().unwrap_or("")),
             Self::Producer => formatter.write_str(coffee.data.producer.as_deref().unwrap_or("")),
             Self::Farm => formatter.write_str(coffee.data.farm.as_deref().unwrap_or("")),
-            Self::Elevation => formatter.write_str(coffee.data.elevation.as_deref().unwrap_or("")),
+            Self::Elevation => match coffee.data.elevation {
+                Some(value) => value.fmt(formatter),
+                None => Ok(()),
+            },
             Self::Variety => formatter.write_str(coffee.data.variety.as_deref().unwrap_or("")),
             Self::Process => formatter.write_str(coffee.data.process.as_deref().unwrap_or("")),
         }
@@ -293,6 +296,7 @@ mod tests {
             "{=roaster value}",
             "{=name value}",
             "{%unknown}",
+            "{%print_height}",
             "{label}",
             "{added}",
             "{name}",

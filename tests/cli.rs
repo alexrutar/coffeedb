@@ -264,3 +264,58 @@ flavours = []
     directory.close()?;
     Ok(())
 }
+
+#[test]
+fn prints_existing_coffee_as_svg() -> Result<()> {
+    let directory = TempDir::new()?;
+    let database = directory.path().join("coffeedb.db");
+    let record = directory.path().join("record.toml");
+    std::fs::write(
+        &record,
+        r#"name = "Test Coffee"
+roaster = "Test Roaster"
+flavours = []
+"#,
+    )?;
+
+    Command::cargo_bin("coffeedb")?
+        .args(["--database", database.to_str().unwrap(), "add", "filter"])
+        .env("EDITOR", format!("cp {}", record.display()))
+        .write_stdin("\n")
+        .assert()
+        .success();
+
+    Command::cargo_bin("coffeedb")?
+        .args(["--database", database.to_str().unwrap(), "print", "F1"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::starts_with("<svg ")
+                .and(predicate::str::contains("Test Coffee"))
+                .and(predicate::str::contains("Test Roaster"))
+                .and(predicate::str::contains("#F1"))
+                .and(predicate::str::contains("(#F1)").not())
+                .and(predicate::str::ends_with("</svg>\n")),
+        )
+        .stderr(predicate::str::is_empty());
+
+    directory.close()?;
+    Ok(())
+}
+
+#[test]
+fn printing_unknown_coffee_exits_with_error() -> Result<()> {
+    let directory = TempDir::new()?;
+    let database = directory.path().join("coffeedb.db");
+
+    Command::cargo_bin("coffeedb")?
+        .args(["--database", database.to_str().unwrap(), "print", "F1"])
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("coffee 'F1' does not exist"));
+
+    directory.close()?;
+    Ok(())
+}
