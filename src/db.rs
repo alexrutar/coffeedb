@@ -1,6 +1,7 @@
 use std::{num::NonZero, path::Path};
 
 use anyhow::{Context, Result, anyhow, bail};
+use chrono::{DateTime, Local};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 use crate::{
@@ -16,6 +17,7 @@ CREATE TABLE Roasters (
 
 CREATE TABLE Coffee (
   label TEXT NOT NULL PRIMARY KEY,
+  added TEXT NOT NULL,
   name TEXT NOT NULL,
   roast_date TEXT,
   roaster TEXT NOT NULL REFERENCES Roasters(name),
@@ -141,35 +143,39 @@ impl Database {
             .and_then(NonZero::new)
             .ok_or_else(|| anyhow!("label counter is outside the supported range"))?;
         let label = Label::new(kind, index);
-        insert_coffee(&transaction, label, &data)?;
+        let added = Local::now();
+        insert_coffee(&transaction, label, &added, &data)?;
         transaction.commit()?;
-        Ok(Coffee { label, data })
+        Ok(Coffee { label, added, data })
     }
 
     pub fn get(&self, label: Label) -> Result<Option<Coffee>> {
-        let data = self
+        let row = self
             .connection
             .query_row(
-                "SELECT name, roast_date, roaster, origin, producer, farm, elevation, variety, process
+                "SELECT added, name, roast_date, roaster, origin, producer, farm, elevation, variety, process
                  FROM Coffee WHERE label = ?1",
                 [label],
                 |row| {
-                    Ok(CoffeeData {
-                        name: row.get(0)?,
-                        roast_date: row.get(1)?,
-                        roaster: row.get(2)?,
-                        origin: row.get(3)?,
-                        producer: row.get(4)?,
-                        farm: row.get(5)?,
-                        elevation: row.get(6)?,
-                        variety: row.get(7)?,
-                        process: row.get(8)?,
-                        flavours: Vec::new(),
-                    })
+                    Ok((
+                        row.get::<_, DateTime<Local>>(0)?,
+                        CoffeeData {
+                            name: row.get(1)?,
+                            roast_date: row.get(2)?,
+                            roaster: row.get(3)?,
+                            origin: row.get(4)?,
+                            producer: row.get(5)?,
+                            farm: row.get(6)?,
+                            elevation: row.get(7)?,
+                            variety: row.get(8)?,
+                            process: row.get(9)?,
+                            flavours: Vec::new(),
+                        },
+                    ))
                 },
             )
             .optional()?;
-        let Some(mut data) = data else {
+        let Some((added, mut data)) = row else {
             return Ok(None);
         };
         let mut statement = self
@@ -178,7 +184,7 @@ impl Database {
         data.flavours = statement
             .query_map([label], |row| row.get(0))?
             .collect::<rusqlite::Result<_>>()?;
-        Ok(Some(Coffee { label, data }))
+        Ok(Some(Coffee { label, added, data }))
     }
 
     pub fn update(
@@ -189,6 +195,14 @@ impl Database {
     ) -> Result<Coffee> {
         let data = data.validate()?;
         let transaction = self.connection.transaction()?;
+        let added: DateTime<Local> = transaction
+            .query_row(
+                "SELECT added FROM Coffee WHERE label = ?1",
+                [label],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| anyhow!("coffee '{label}' does not exist"))?;
         ensure_roaster(&transaction, &data.roaster, new_roaster_url)?;
         let changed = transaction.execute(
             "UPDATE Coffee SET name=?2, roast_date=?3, roaster=?4, origin=?5,
@@ -206,13 +220,11 @@ impl Database {
                 data.process
             ],
         )?;
-        if changed == 0 {
-            bail!("coffee '{label}' does not exist");
-        }
+        debug_assert_eq!(changed, 1);
         transaction.execute("DELETE FROM CoffeeFlavours WHERE coffee = ?1", [label])?;
         insert_flavours(&transaction, label, &data.flavours)?;
         transaction.commit()?;
-        Ok(Coffee { label, data })
+        Ok(Coffee { label, added, data })
     }
 
     pub fn list(&self) -> Result<Vec<Coffee>> {
@@ -251,13 +263,19 @@ fn ensure_roaster(transaction: &Transaction<'_>, name: &str, url: Option<&str>) 
     Ok(())
 }
 
-fn insert_coffee(transaction: &Transaction<'_>, label: Label, data: &CoffeeData) -> Result<()> {
+fn insert_coffee(
+    transaction: &Transaction<'_>,
+    label: Label,
+    added: &DateTime<Local>,
+    data: &CoffeeData,
+) -> Result<()> {
     transaction.execute(
         "INSERT INTO Coffee
-         (label, name, roast_date, roaster, origin, producer, farm, elevation, variety, process)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+         (label, added, name, roast_date, roaster, origin, producer, farm, elevation, variety, process)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             label,
+            added,
             data.name,
             data.roast_date,
             data.roaster,
@@ -336,10 +354,28 @@ mod tests {
     fn updates_data_and_flavours() -> Result<()> {
         let mut database = Database::in_memory()?;
         let coffee = database.add(CoffeeType::Omni, data("Old"), Some("https://example.com"))?;
+        let added = coffee.added;
         let mut replacement = data("New");
         replacement.flavours = vec!["cocoa".into()];
         database.update(coffee.label, replacement.clone(), None)?;
-        assert_eq!(database.get(coffee.label)?.unwrap().data, replacement);
+        let updated = database.get(coffee.label)?.unwrap();
+        assert_eq!(updated.data, replacement);
+        assert_eq!(updated.added, added);
+        Ok(())
+    }
+
+    #[test]
+    fn stores_added_with_datetime_to_sql() -> Result<()> {
+        let mut database = Database::in_memory()?;
+        let coffee = database.add(CoffeeType::Filter, data("Timestamped"), None)?;
+        let stored: String = database.connection.query_row(
+            "SELECT added FROM Coffee WHERE label = ?1",
+            [coffee.label],
+            |row| row.get(0),
+        )?;
+
+        assert!(stored.ends_with("+00:00"));
+        assert_eq!(database.get(coffee.label)?.unwrap().added, coffee.added);
         Ok(())
     }
 

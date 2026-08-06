@@ -1,7 +1,7 @@
 use std::{collections::HashSet, fmt, str::FromStr};
 
 use anyhow::{Result, bail};
-use chrono::NaiveDate;
+use chrono::{DateTime, Local, NaiveDate};
 use serde::{Deserialize, Serialize};
 
 use crate::label::Label;
@@ -9,6 +9,7 @@ use crate::label::Label;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Coffee {
     pub label: Label,
+    pub added: DateTime<Local>,
     pub data: CoffeeData,
 }
 

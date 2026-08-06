@@ -10,6 +10,7 @@ pub const DEFAULT_TEMPLATE: &str = "{label}: {name} — {roaster} {origin}";
 #[derive(Debug, Clone, Copy)]
 enum Key {
     Label,
+    Added,
     Name,
     RoastDate,
     Roaster,
@@ -27,6 +28,7 @@ impl Ast<'_> for Key {
     fn from_expr(expression: &str) -> Result<Self> {
         match expression {
             "label" => Ok(Self::Label),
+            "added" => Ok(Self::Added),
             "name" => Ok(Self::Name),
             "roast_date" => Ok(Self::RoastDate),
             "roaster" => Ok(Self::Roaster),
@@ -68,6 +70,7 @@ enum Value<'a> {
     Text(&'a str),
     Label(crate::label::Label),
     Date(Option<chrono::NaiveDate>),
+    Timestamp(&'a chrono::DateTime<chrono::Local>),
 }
 
 impl fmt::Display for Value<'_> {
@@ -77,6 +80,7 @@ impl fmt::Display for Value<'_> {
             Self::Label(value) => value.fmt(formatter),
             Self::Date(Some(value)) => value.fmt(formatter),
             Self::Date(None) => Ok(()),
+            Self::Timestamp(value) => value.fmt(formatter),
         }
     }
 }
@@ -88,6 +92,7 @@ impl Manifest<Key> for CoffeeManifest<'_> {
         let coffee = self.0;
         let value = match key {
             Key::Label => Value::Label(coffee.label),
+            Key::Added => Value::Timestamp(&coffee.added),
             Key::Name => Value::Text(&coffee.data.name),
             Key::RoastDate => Value::Date(coffee.data.roast_date),
             Key::Roaster => Value::Text(&coffee.data.roaster),
@@ -114,6 +119,7 @@ mod tests {
     fn renders_fields_and_empty_options() {
         let coffee = Coffee {
             label: crate::label::Label::new(CoffeeType::Filter, NonZero::new(1).unwrap()),
+            added: chrono::Local::now(),
             data: CoffeeData {
                 name: "Lot One".into(),
                 roast_date: None,
@@ -127,8 +133,10 @@ mod tests {
                 flavours: Vec::new(),
             },
         };
-        let template: CoffeeTemplate = "{label} {name} {origin}".parse().unwrap();
-        assert_eq!(template.render(&coffee).unwrap(), "F1 Lot One ");
+        let template: CoffeeTemplate = "{label} {name} {origin} {added}".parse().unwrap();
+        let rendered = template.render(&coffee).unwrap();
+        assert!(rendered.starts_with("F1 Lot One  "));
+        assert!(rendered.ends_with(&coffee.added.to_string()));
         assert!("{flavours}".parse::<CoffeeTemplate>().is_err());
     }
 }
