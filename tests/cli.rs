@@ -304,6 +304,95 @@ flavours = []
 }
 
 #[test]
+fn prints_existing_coffee_as_svg_to_file() -> Result<()> {
+    let directory = TempDir::new()?;
+    let database = directory.path().join("coffeedb.db");
+    let record = directory.path().join("record.toml");
+    let output = directory.path().join("coffee.svg");
+    std::fs::write(
+        &record,
+        r#"name = "Test Coffee"
+roaster = "Test Roaster"
+flavours = []
+"#,
+    )?;
+
+    Command::cargo_bin("coffeedb")?
+        .args(["--database", database.to_str().unwrap(), "add", "filter"])
+        .env("EDITOR", format!("cp {}", record.display()))
+        .write_stdin("\n")
+        .assert()
+        .success();
+
+    Command::cargo_bin("coffeedb")?
+        .args([
+            "--database",
+            database.to_str().unwrap(),
+            "print",
+            "F1",
+            "--out",
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::is_empty());
+
+    let svg = std::fs::read_to_string(&output)?;
+    assert!(svg.starts_with("<svg "));
+    assert!(svg.contains("Test Coffee"));
+    assert!(svg.contains("Test Roaster"));
+    assert!(svg.contains("#F1"));
+    assert!(svg.ends_with("</svg>\n"));
+
+    directory.close()?;
+    Ok(())
+}
+
+#[test]
+fn printing_to_an_existing_file_exits_with_error() -> Result<()> {
+    let directory = TempDir::new()?;
+    let database = directory.path().join("coffeedb.db");
+    let record = directory.path().join("record.toml");
+    let output = directory.path().join("coffee.svg");
+    std::fs::write(
+        &record,
+        r#"name = "Test Coffee"
+roaster = "Test Roaster"
+flavours = []
+"#,
+    )?;
+    std::fs::write(&output, "existing contents")?;
+
+    Command::cargo_bin("coffeedb")?
+        .args(["--database", database.to_str().unwrap(), "add", "filter"])
+        .env("EDITOR", format!("cp {}", record.display()))
+        .write_stdin("\n")
+        .assert()
+        .success();
+
+    Command::cargo_bin("coffeedb")?
+        .args([
+            "--database",
+            database.to_str().unwrap(),
+            "print",
+            "F1",
+            "--out",
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("failed to create output file"));
+
+    assert_eq!(std::fs::read_to_string(&output)?, "existing contents");
+
+    directory.close()?;
+    Ok(())
+}
+
+#[test]
 fn printing_unknown_coffee_exits_with_error() -> Result<()> {
     let directory = TempDir::new()?;
     let database = directory.path().join("coffeedb.db");

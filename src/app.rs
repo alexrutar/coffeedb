@@ -1,6 +1,6 @@
 use std::{
     ffi::OsStr,
-    fs::create_dir_all,
+    fs::{OpenOptions, create_dir_all},
     io::{self, Write},
     path::PathBuf,
     str::FromStr,
@@ -67,6 +67,9 @@ enum Command {
         /// Coffee label, such as F3.
         #[arg(add = ArgValueCompleter::new(complete_labels))]
         label: Label,
+        /// Write the SVG to a file instead of standard output.
+        #[arg(long, value_name = "PATH")]
+        out: Option<PathBuf>,
     },
 }
 
@@ -83,7 +86,7 @@ impl Cli {
             Command::Add { kind } => add(&mut database, kind),
             Command::Edit { label } => edit(&mut database, label),
             Command::List { template, flavours } => list(&database, &template, flavours),
-            Command::Print { label } => print_card(&database, label),
+            Command::Print { label, out } => print_card(&database, label, out),
         }
     }
 }
@@ -216,12 +219,23 @@ fn list(database: &Database, template: &CoffeeTemplate, flavours: bool) -> Resul
     Ok(())
 }
 
-fn print_card(database: &Database, label: Label) -> Result<()> {
+fn print_card(database: &Database, label: Label, out: Option<PathBuf>) -> Result<()> {
     let Some(coffee) = database.get(label)? else {
         bail!("coffee '{label}' does not exist");
     };
-    let stdout = io::stdout();
-    write!(stdout.lock(), "{}", render_svg(&coffee))?;
+    let svg = render_svg(&coffee);
+    if let Some(path) = out {
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .with_context(|| format!("failed to create output file '{}'", path.display()))?;
+        write!(output, "{svg}")
+            .with_context(|| format!("failed to write output file '{}'", path.display()))?;
+    } else {
+        let stdout = io::stdout();
+        write!(stdout.lock(), "{svg}")?;
+    }
     Ok(())
 }
 
