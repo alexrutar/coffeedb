@@ -141,3 +141,28 @@ fn flavours_conflicts_with_explicit_template() -> Result<()> {
     directory.close()?;
     Ok(())
 }
+
+#[test]
+fn invalid_roaster_url_is_reprompted() -> Result<()> {
+    let directory = TempDir::new()?;
+    let database = directory.path().join("coffeedb.db");
+    let record = directory.path().join("record.toml");
+    std::fs::write(
+        &record,
+        r#"name = "Test Coffee"
+roaster = "Test Roaster"
+flavours = []
+"#,
+    )?;
+
+    Command::cargo_bin("coffeedb")?
+        .args(["--database", database.to_str().unwrap(), "add", "filter"])
+        .env("EDITOR", format!("cp {}", record.display()))
+        .write_stdin("not a url\nhttps://example.com\n")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Invalid URL"));
+
+    directory.close()?;
+    Ok(())
+}

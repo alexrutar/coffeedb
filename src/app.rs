@@ -8,6 +8,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use etcetera::{AppStrategy, AppStrategyArgs, choose_app_strategy};
+use url::Url;
 
 use crate::{
     db::Database,
@@ -92,7 +93,7 @@ fn add(database: &mut Database, kind: CoffeeType) -> Result<()> {
     loop {
         match resolve_roaster(database, &data.roaster)? {
             RoasterChoice::Accept(url) => {
-                let coffee = database.add(kind, data, url.as_deref())?;
+                let coffee = database.add(kind, data, url.as_ref())?;
                 print!("{coffee}");
                 return Ok(());
             }
@@ -118,7 +119,7 @@ fn edit(database: &mut Database, label: Label) -> Result<()> {
     loop {
         match resolve_roaster(database, &data.roaster)? {
             RoasterChoice::Accept(url) => {
-                let coffee = database.update(label, data, url.as_deref())?;
+                let coffee = database.update(label, data, url.as_ref())?;
                 print!("{coffee}");
                 return Ok(());
             }
@@ -172,7 +173,7 @@ fn edit_record(source: &str, original: Option<&CoffeeData>) -> Result<Option<Cof
 }
 
 enum RoasterChoice {
-    Accept(Option<String>),
+    Accept(Option<Url>),
     Edit,
 }
 
@@ -181,13 +182,18 @@ fn resolve_roaster(database: &Database, roaster: &str) -> Result<RoasterChoice> 
         return Ok(RoasterChoice::Accept(None));
     }
     eprintln!("Roaster '{roaster}' does not exist and will be created.");
-    let input = prompt("URL (blank for none, or 'edit' to edit the coffee again)")?;
-    if matches!(input.as_str(), "e" | "edit") {
-        Ok(RoasterChoice::Edit)
-    } else if input.is_empty() {
-        Ok(RoasterChoice::Accept(None))
-    } else {
-        Ok(RoasterChoice::Accept(Some(input)))
+    loop {
+        let input = prompt("URL (blank for none, or 'edit' to edit the coffee again)")?;
+        if matches!(input.as_str(), "e" | "edit") {
+            return Ok(RoasterChoice::Edit);
+        }
+        if input.is_empty() {
+            return Ok(RoasterChoice::Accept(None));
+        }
+        match Url::parse(&input) {
+            Ok(url) => return Ok(RoasterChoice::Accept(Some(url))),
+            Err(error) => eprintln!("Invalid URL: {error}"),
+        }
     }
 }
 
