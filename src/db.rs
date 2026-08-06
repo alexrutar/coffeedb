@@ -77,6 +77,18 @@ impl Database {
         Ok(database)
     }
 
+    pub fn open_read_only(path: &Path) -> Result<Self> {
+        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let connection = Connection::open_with_flags(path, flags)
+            .with_context(|| format!("failed to open database '{}'", path.display()))?;
+        let application_id: i32 =
+            connection.pragma_query_value(None, "application_id", |row| row.get(0))?;
+        if application_id != APPLICATION_ID {
+            bail!("database is not coffeedb-compatible");
+        }
+        Ok(Self { connection })
+    }
+
     #[cfg(test)]
     fn in_memory() -> Result<Self> {
         let flags = OpenFlags::SQLITE_OPEN_READ_WRITE

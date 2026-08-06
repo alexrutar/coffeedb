@@ -211,20 +211,56 @@ flavours = []
 }
 
 #[test]
-fn generates_hidden_shell_completions_without_opening_database() -> Result<()> {
+fn generates_fish_registration_without_opening_database() -> Result<()> {
     Command::cargo_bin("coffeedb")?
-        .args(["completions", "bash"])
+        .env("COMPLETE", "fish")
         .env("COFFEEDB_DATABASE_PATH", "/this/path/must/not/be/opened.db")
         .assert()
         .success()
-        .stdout(predicate::str::contains("_coffeedb"))
+        .stdout(
+            predicate::str::contains("complete --keep-order --exclusive")
+                .and(predicate::str::contains("COMPLETE=fish")),
+        )
         .stderr(predicate::str::is_empty());
 
+    Ok(())
+}
+
+#[test]
+fn dynamically_completes_edit_labels_with_fish_help() -> Result<()> {
+    let directory = TempDir::new()?;
+    let database = directory.path().join("coffeedb.db");
+    let record = directory.path().join("record.toml");
+    std::fs::write(
+        &record,
+        r#"name = "Test Coffee"
+roaster = "Test Roaster"
+flavours = []
+"#,
+    )?;
+
     Command::cargo_bin("coffeedb")?
-        .arg("--help")
+        .args(["--database", database.to_str().unwrap(), "add", "filter"])
+        .env("EDITOR", format!("cp {}", record.display()))
+        .write_stdin("\n")
+        .assert()
+        .success();
+
+    Command::cargo_bin("coffeedb")?
+        .args([
+            "--",
+            "coffeedb",
+            "--database",
+            database.to_str().unwrap(),
+            "edit",
+            "F",
+        ])
+        .env("COMPLETE", "fish")
         .assert()
         .success()
-        .stdout(predicate::str::contains("completions").not());
+        .stdout("F1\tTest Coffee (by Test Roaster)\n")
+        .stderr(predicate::str::is_empty());
 
+    directory.close()?;
     Ok(())
 }

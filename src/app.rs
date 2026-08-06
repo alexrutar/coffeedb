@@ -1,4 +1,5 @@
 use std::{
+    ffi::OsStr,
     fs::create_dir_all,
     io::{self, Write},
     path::PathBuf,
@@ -6,8 +7,9 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use clap::{CommandFactory, Parser, Subcommand};
-use clap_complete::aot::{Shell, generate};
+use clap::builder::StyledStr;
+use clap::{Parser, Subcommand};
+use clap_complete::engine::{ArgValueCompleter, CompletionCandidate};
 use etcetera::{AppStrategy, AppStrategyArgs, choose_app_strategy};
 use url::Url;
 
@@ -47,6 +49,7 @@ enum Command {
     /// Edit an existing coffee.
     Edit {
         /// Coffee label, such as F3.
+        #[arg(add = ArgValueCompleter::new(complete_labels))]
         label: Label,
     },
     /// List all coffees.
@@ -58,34 +61,11 @@ enum Command {
         #[arg(long)]
         flavours: bool,
     },
-    /// Generate a shell completion script.
-    #[command(hide = true)]
-    Completions {
-        /// Shell for which to generate completions.
-        shell: Shell,
-    },
 }
 
 impl Cli {
     pub fn run(self) -> Result<()> {
-        if let Command::Completions { shell } = self.command {
-            let mut command = Self::command();
-            let name = command.get_name().to_owned();
-            generate(shell, &mut command, name, &mut io::stdout().lock());
-            return Ok(());
-        }
-
-        let path = match self.database {
-            Some(path) => path,
-            None => {
-                let strategy = choose_app_strategy(AppStrategyArgs {
-                    top_level_domain: "org".into(),
-                    author: env!("CARGO_PKG_NAME").into(),
-                    app_name: env!("CARGO_PKG_NAME").into(),
-                })?;
-                strategy.data_dir().join("coffeedb.db")
-            }
-        };
+        let path = database_path(self.database)?;
         if let Some(parent) = path.parent() {
             create_dir_all(parent)
                 .with_context(|| format!("failed to create directory '{}'", parent.display()))?;
@@ -96,9 +76,73 @@ impl Cli {
             Command::Add { kind } => add(&mut database, kind),
             Command::Edit { label } => edit(&mut database, label),
             Command::List { template, flavours } => list(&database, &template, flavours),
-            Command::Completions { .. } => unreachable!(),
         }
     }
+}
+
+fn default_database_path() -> Result<PathBuf> {
+    let strategy = choose_app_strategy(AppStrategyArgs {
+        top_level_domain: "org".into(),
+        author: env!("CARGO_PKG_NAME").into(),
+        app_name: env!("CARGO_PKG_NAME").into(),
+    })?;
+    Ok(strategy.data_dir().join("coffeedb.db"))
+}
+
+fn database_path(explicit: Option<PathBuf>) -> Result<PathBuf> {
+    explicit.map_or_else(default_database_path, Ok)
+}
+
+fn completion_database_path() -> Option<PathBuf> {
+    let mut arguments = std::env::args_os();
+    while let Some(argument) = arguments.next() {
+        if argument == "-D" || argument == "--database" {
+            return arguments.next().map(PathBuf::from);
+        }
+        let Some(argument) = argument.to_str() else {
+            continue;
+        };
+        if let Some(path) = argument.strip_prefix("--database=") {
+            return Some(path.into());
+        }
+        if let Some(path) = argument.strip_prefix("-D").filter(|path| !path.is_empty()) {
+            return Some(path.into());
+        }
+    }
+
+    std::env::var_os("COFFEEDB_DATABASE_PATH")
+        .map(PathBuf::from)
+        .or_else(|| default_database_path().ok())
+}
+
+fn complete_labels(current: &OsStr) -> Vec<CompletionCandidate> {
+    let Some(current) = current.to_str() else {
+        return Vec::new();
+    };
+    let Some(path) = completion_database_path() else {
+        return Vec::new();
+    };
+    let Ok(database) = Database::open_read_only(&path) else {
+        return Vec::new();
+    };
+    let Ok(template) = CoffeeTemplate::from_str(r#"{%name} (by {%roaster})"#) else {
+        return Vec::new();
+    };
+    let Ok(coffees) = database.list() else {
+        return Vec::new();
+    };
+
+    coffees
+        .into_iter()
+        .filter(|coffee| coffee.label.to_string().starts_with(current))
+        .filter_map(|coffee| {
+            let help = template.render(&coffee).ok()?;
+            Some(
+                CompletionCandidate::new(coffee.label.to_string())
+                    .help(Some(StyledStr::from(help))),
+            )
+        })
+        .collect()
 }
 
 fn add(database: &mut Database, kind: CoffeeType) -> Result<()> {

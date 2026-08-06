@@ -6,8 +6,9 @@ mod record;
 mod template;
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 
 fn main() -> Result<()> {
+    clap_complete::CompleteEnv::with_factory(app::Cli::command).complete();
     app::Cli::parse().run()
 }
