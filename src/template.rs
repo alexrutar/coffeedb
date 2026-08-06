@@ -1,4 +1,8 @@
-use std::{convert::Infallible, fmt, str::FromStr};
+use std::{
+    convert::Infallible,
+    fmt::{self, Display as _},
+    str::FromStr,
+};
 
 use anyhow::{Result, anyhow, bail};
 use mufmt::{Ast, Manifest};
@@ -48,19 +52,18 @@ impl Field {
         }
     }
 
-    fn render(self, coffee: &Coffee) -> String {
+    fn fmt(self, coffee: &Coffee, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::RoastDate => coffee
-                .data
-                .roast_date
-                .map(|date| date.to_string())
-                .unwrap_or_default(),
-            Self::Origin => coffee.data.origin.clone().unwrap_or_default(),
-            Self::Producer => coffee.data.producer.clone().unwrap_or_default(),
-            Self::Farm => coffee.data.farm.clone().unwrap_or_default(),
-            Self::Elevation => coffee.data.elevation.clone().unwrap_or_default(),
-            Self::Variety => coffee.data.variety.clone().unwrap_or_default(),
-            Self::Process => coffee.data.process.clone().unwrap_or_default(),
+            Self::RoastDate => match coffee.data.roast_date {
+                Some(value) => value.fmt(formatter),
+                None => Ok(()),
+            },
+            Self::Origin => formatter.write_str(coffee.data.origin.as_deref().unwrap_or("")),
+            Self::Producer => formatter.write_str(coffee.data.producer.as_deref().unwrap_or("")),
+            Self::Farm => formatter.write_str(coffee.data.farm.as_deref().unwrap_or("")),
+            Self::Elevation => formatter.write_str(coffee.data.elevation.as_deref().unwrap_or("")),
+            Self::Variety => formatter.write_str(coffee.data.variety.as_deref().unwrap_or("")),
+            Self::Process => formatter.write_str(coffee.data.process.as_deref().unwrap_or("")),
         }
     }
 }
@@ -109,15 +112,24 @@ impl Atom {
         Ok(Self::Field(field))
     }
 
-    fn render(&self, coffee: &Coffee) -> String {
+    fn fmt(&self, coffee: &Coffee, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Field(field) => field.render(coffee),
-            Self::String(value) => value.clone(),
-            Self::Meta(Meta::Label) => coffee.label.to_string(),
-            Self::Meta(Meta::Added) => coffee.added.to_string(),
-            Self::Meta(Meta::Name) => coffee.data.name.clone(),
-            Self::Meta(Meta::Roaster) => coffee.data.roaster.clone(),
-            Self::Meta(Meta::Flavours) => coffee.data.flavours.join(", "),
+            Self::Field(field) => field.fmt(coffee, formatter),
+            Self::String(value) => formatter.write_str(value),
+            Self::Meta(Meta::Label) => coffee.label.fmt(formatter),
+            Self::Meta(Meta::Added) => coffee.added.fmt(formatter),
+            Self::Meta(Meta::Name) => formatter.write_str(&coffee.data.name),
+            Self::Meta(Meta::Roaster) => formatter.write_str(&coffee.data.roaster),
+            Self::Meta(Meta::Flavours) => {
+                let mut flavours = coffee.data.flavours.iter();
+                if let Some(first) = flavours.next() {
+                    formatter.write_str(first)?;
+                    for flavour in flavours {
+                        write!(formatter, ", {flavour}")?;
+                    }
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -188,19 +200,31 @@ impl FromStr for CoffeeTemplate {
 
 struct CoffeeManifest<'a>(&'a Coffee);
 
+struct DisplayedCoffeeExpression<'a, 'e> {
+    coffee: &'a Coffee,
+    expression: &'e Expression,
+}
+
+impl fmt::Display for DisplayedCoffeeExpression<'_, '_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let atom = match self.expression {
+            Expression::Bare(atom) => atom,
+            Expression::IfDefined(field, atom) if field.is_defined(self.coffee) => atom,
+            Expression::IfUndefined(field, atom) if !field.is_defined(self.coffee) => atom,
+            Expression::IfDefined(..) | Expression::IfUndefined(..) => return Ok(()),
+        };
+        atom.fmt(self.coffee, formatter)
+    }
+}
+
 impl Manifest<Expression> for CoffeeManifest<'_> {
     type Error = Infallible;
 
     fn manifest(&self, expression: &Expression) -> Result<impl fmt::Display, Self::Error> {
-        let rendered = match expression {
-            Expression::Bare(atom) => atom.render(self.0),
-            Expression::IfDefined(field, atom) if field.is_defined(self.0) => atom.render(self.0),
-            Expression::IfUndefined(field, atom) if !field.is_defined(self.0) => {
-                atom.render(self.0)
-            }
-            Expression::IfDefined(..) | Expression::IfUndefined(..) => String::new(),
-        };
-        Ok(rendered)
+        Ok(DisplayedCoffeeExpression {
+            coffee: self.0,
+            expression,
+        })
     }
 }
 
