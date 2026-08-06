@@ -38,7 +38,7 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Add a purchased coffee.
+    /// Add a new coffee.
     Add {
         /// Label category for the new coffee.
         #[arg(value_enum)]
