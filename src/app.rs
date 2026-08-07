@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use clap::builder::StyledStr;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use clap_complete::engine::{ArgValueCompleter, CompletionCandidate};
 use etcetera::{AppStrategy, AppStrategyArgs, choose_app_strategy};
 use url::Url;
@@ -17,7 +17,7 @@ use crate::{
     db::Database,
     edit::{Builder, edit_with_builder},
     label::{CoffeeType, Label},
-    print::render_svg,
+    print::{render_json, render_svg, render_text, render_toml},
     record::CoffeeData,
     template::{CoffeeTemplate, DEFAULT_TEMPLATE},
 };
@@ -62,12 +62,15 @@ enum Command {
         #[arg(long)]
         flavours: bool,
     },
-    /// Print a card for an existing coffee as SVG.
-    Print {
+    /// Get a human-readable description of an existing coffee.
+    Get {
         /// Coffee label, such as F3.
         #[arg(add = ArgValueCompleter::new(complete_labels))]
         label: Label,
-        /// Write the SVG to a file instead of standard output.
+        /// Output format.
+        #[arg(short, long, value_enum, default_value_t)]
+        format: OutputFormat,
+        /// Write the output to a file instead of standard output.
         #[arg(long, value_name = "PATH")]
         out: Option<PathBuf>,
     },
@@ -86,7 +89,7 @@ impl Cli {
             Command::Add { kind } => add(&mut database, kind),
             Command::Edit { label } => edit(&mut database, label),
             Command::List { template, flavours } => list(&database, &template, flavours),
-            Command::Print { label, out } => print_card(&database, label, out),
+            Command::Get { label, format, out } => get(&database, label, format, out),
         }
     }
 }
@@ -219,22 +222,41 @@ fn list(database: &Database, template: &CoffeeTemplate, flavours: bool) -> Resul
     Ok(())
 }
 
-fn print_card(database: &Database, label: Label, out: Option<PathBuf>) -> Result<()> {
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+enum OutputFormat {
+    #[default]
+    Text,
+    Svg,
+    Toml,
+    Json,
+}
+
+fn get(
+    database: &Database,
+    label: Label,
+    format: OutputFormat,
+    out: Option<PathBuf>,
+) -> Result<()> {
     let Some(coffee) = database.get(label)? else {
         bail!("coffee '{label}' does not exist");
     };
-    let svg = render_svg(&coffee);
+    let rendered = match format {
+        OutputFormat::Text => render_text(&coffee),
+        OutputFormat::Svg => render_svg(&coffee),
+        OutputFormat::Toml => render_toml(&coffee)?,
+        OutputFormat::Json => render_json(&coffee)?,
+    };
     if let Some(path) = out {
         let mut output = OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&path)
             .with_context(|| format!("failed to create output file '{}'", path.display()))?;
-        write!(output, "{svg}")
+        write!(output, "{rendered}")
             .with_context(|| format!("failed to write output file '{}'", path.display()))?;
     } else {
         let stdout = io::stdout();
-        write!(stdout.lock(), "{svg}")?;
+        write!(stdout.lock(), "{rendered}")?;
     }
     Ok(())
 }

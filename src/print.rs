@@ -1,5 +1,7 @@
 use std::fmt::{self, Write as _};
 
+use serde::Serialize;
+
 use crate::record::Coffee;
 
 const DIVIDER_PADDING_ABOVE: usize = 14;
@@ -7,6 +9,84 @@ const DIVIDER_PADDING_BELOW: usize = 22;
 const PARAGRAPH_PADDING: usize = 32;
 const HORIZONTAL_PADDING: usize = 30;
 const MINIMUM_WIDTH: usize = 180;
+
+#[derive(Serialize)]
+struct SerializableCoffee<'a> {
+    label: String,
+    #[serde(flatten)]
+    data: &'a crate::record::CoffeeData,
+}
+
+impl<'a> From<&'a Coffee> for SerializableCoffee<'a> {
+    fn from(coffee: &'a Coffee) -> Self {
+        Self {
+            label: coffee.label.to_string(),
+            data: &coffee.data,
+        }
+    }
+}
+
+pub fn render_toml(coffee: &Coffee) -> Result<String, toml::ser::Error> {
+    toml::to_string_pretty(&SerializableCoffee::from(coffee))
+}
+
+pub fn render_json(coffee: &Coffee) -> Result<String, serde_json::Error> {
+    let mut output = serde_json::to_string_pretty(&SerializableCoffee::from(coffee))?;
+    output.push('\n');
+    Ok(output)
+}
+
+pub fn render_text(coffee: &Coffee) -> String {
+    let mut output = format!("{} #{}\n", coffee.data.name, coffee.label);
+
+    if !coffee.data.flavours.is_empty() {
+        writeln!(output, "{}", coffee.data.flavours.join(", ")).unwrap();
+    }
+    output.push('\n');
+
+    if coffee.data.process.is_some() || coffee.data.variety.is_some() {
+        let first_value = coffee
+            .data
+            .process
+            .as_deref()
+            .or(coffee.data.variety.as_deref())
+            .unwrap();
+        write!(output, "{} ", indefinite_article(first_value)).unwrap();
+        if let Some(process) = coffee.data.process.as_deref() {
+            write!(output, "{} process", process.to_lowercase()).unwrap();
+        }
+        if let Some(variety) = coffee.data.variety.as_deref() {
+            if coffee.data.process.is_some() {
+                output.push(' ');
+            }
+            output.push_str(&variety.to_lowercase());
+        }
+        output.push('\n');
+    }
+
+    if coffee.data.producer.is_some() || coffee.data.farm.is_some() {
+        output.push_str("produced ");
+        match (coffee.data.producer.as_deref(), coffee.data.farm.as_deref()) {
+            (Some(producer), Some(farm)) => writeln!(output, "by {producer} @ {farm}").unwrap(),
+            (Some(producer), None) => writeln!(output, "by {producer}").unwrap(),
+            (None, Some(farm)) => writeln!(output, "at {farm}").unwrap(),
+            (None, None) => unreachable!(),
+        }
+    }
+    writeln!(output, "roasted by {}", coffee.data.roaster).unwrap();
+
+    if coffee.data.origin.is_some() || coffee.data.elevation.is_some() {
+        output.push('\n');
+        match (coffee.data.origin.as_deref(), coffee.data.elevation) {
+            (Some(origin), Some(elevation)) => writeln!(output, "{origin}  {elevation}").unwrap(),
+            (Some(origin), None) => writeln!(output, "{origin}").unwrap(),
+            (None, Some(elevation)) => writeln!(output, "{elevation}").unwrap(),
+            (None, None) => unreachable!(),
+        }
+    }
+
+    output
+}
 
 pub fn render_svg(coffee: &Coffee) -> String {
     let width = estimated_svg_width(coffee);

@@ -266,7 +266,7 @@ flavours = []
 }
 
 #[test]
-fn prints_existing_coffee_as_svg() -> Result<()> {
+fn gets_existing_coffee_as_text() -> Result<()> {
     let directory = TempDir::new()?;
     let database = directory.path().join("coffeedb.db");
     let record = directory.path().join("record.toml");
@@ -274,7 +274,12 @@ fn prints_existing_coffee_as_svg() -> Result<()> {
         &record,
         r#"name = "Test Coffee"
 roaster = "Test Roaster"
-flavours = []
+origin = "Ethiopia"
+producer = "Test Producer"
+elevation = "1800"
+variety = "Bourbon"
+process = "Washed"
+flavours = ["Peach", "Jasmine"]
 "#,
     )?;
 
@@ -286,7 +291,20 @@ flavours = []
         .success();
 
     Command::cargo_bin("coffeedb")?
-        .args(["--database", database.to_str().unwrap(), "print", "F1"])
+        .args(["--database", database.to_str().unwrap(), "get", "F1"])
+        .assert()
+        .success()
+        .stdout("Test Coffee #F1\npeach, jasmine\n\na washed process bourbon\nproduced by Test Producer\nroasted by Test Roaster\n\nEthiopia  1800 masl\n")
+        .stderr(predicate::str::is_empty());
+
+    Command::cargo_bin("coffeedb")?
+        .args([
+            "--database",
+            database.to_str().unwrap(),
+            "get",
+            "F1",
+            "-fsvg",
+        ])
         .assert()
         .success()
         .stdout(
@@ -294,8 +312,42 @@ flavours = []
                 .and(predicate::str::contains("Test Coffee"))
                 .and(predicate::str::contains("Test Roaster"))
                 .and(predicate::str::contains("#F1"))
-                .and(predicate::str::contains("(#F1)").not())
                 .and(predicate::str::ends_with("</svg>\n")),
+        )
+        .stderr(predicate::str::is_empty());
+
+    Command::cargo_bin("coffeedb")?
+        .args([
+            "--database",
+            database.to_str().unwrap(),
+            "get",
+            "F1",
+            "-ftoml",
+        ])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("label = \"F1\"")
+                .and(predicate::str::contains("name = \"Test Coffee\""))
+                .and(predicate::str::contains("\"peach\"")),
+        )
+        .stderr(predicate::str::is_empty());
+
+    Command::cargo_bin("coffeedb")?
+        .args([
+            "--database",
+            database.to_str().unwrap(),
+            "get",
+            "F1",
+            "-fjson",
+        ])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::starts_with("{\n")
+                .and(predicate::str::contains("\"label\": \"F1\""))
+                .and(predicate::str::contains("\"name\": \"Test Coffee\""))
+                .and(predicate::str::ends_with("}\n")),
         )
         .stderr(predicate::str::is_empty());
 
@@ -304,7 +356,7 @@ flavours = []
 }
 
 #[test]
-fn prints_existing_coffee_as_svg_to_file() -> Result<()> {
+fn gets_existing_coffee_as_svg_to_file() -> Result<()> {
     let directory = TempDir::new()?;
     let database = directory.path().join("coffeedb.db");
     let record = directory.path().join("record.toml");
@@ -328,8 +380,10 @@ flavours = []
         .args([
             "--database",
             database.to_str().unwrap(),
-            "print",
+            "get",
             "F1",
+            "--format",
+            "svg",
             "--out",
             output.to_str().unwrap(),
         ])
@@ -375,8 +429,9 @@ flavours = []
         .args([
             "--database",
             database.to_str().unwrap(),
-            "print",
+            "get",
             "F1",
+            "-fsvg",
             "--out",
             output.to_str().unwrap(),
         ])
@@ -398,7 +453,7 @@ fn printing_unknown_coffee_exits_with_error() -> Result<()> {
     let database = directory.path().join("coffeedb.db");
 
     Command::cargo_bin("coffeedb")?
-        .args(["--database", database.to_str().unwrap(), "print", "F1"])
+        .args(["--database", database.to_str().unwrap(), "get", "F1"])
         .assert()
         .failure()
         .code(1)
