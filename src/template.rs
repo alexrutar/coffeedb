@@ -187,7 +187,9 @@ pub struct CoffeeTemplate {
 
 impl CoffeeTemplate {
     pub fn render(&self, coffee: &Coffee) -> Result<String> {
-        Ok(self.inner.render(&CoffeeManifest(coffee))?)
+        self.inner
+            .render(&CoffeeManifest(coffee))
+            .map_err(Into::into)
     }
 }
 

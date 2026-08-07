@@ -9,7 +9,7 @@ use url::Url;
 
 mod types;
 pub use types::CoffeeElevation;
-use types::{BrewDeviceRow, BrewRow, CoffeeRow, JsonRef};
+use types::{BrewDeviceRow, BrewRow, CoffeeRow, Json};
 
 use crate::{
     brew::{Brew, BrewData, BrewDevice, BrewMethod, DeviceLabel, Grinder, GrinderLabel},
@@ -254,7 +254,7 @@ impl Database {
                 CoffeeRow::from_row,
             )
             .optional()?
-            .map(Into::into))
+            .map(|row| row.0))
     }
 
     pub fn update(
@@ -265,40 +265,30 @@ impl Database {
     ) -> Result<Coffee> {
         let data = data.validate()?;
         let transaction = self.connection.transaction()?;
-        let added: DateTime<Local> = transaction
+        ensure_roaster(&transaction, &data.roaster, new_roaster_url)?;
+        let (added, archived): (DateTime<Local>, bool) = transaction
             .query_row(
-                "SELECT added FROM Coffee WHERE label = ?1",
-                [label],
-                |row| row.get(0),
+                "UPDATE Coffee SET name=?2, roast_date=?3, roaster=?4, origin=?5,
+             producer=?6, farm=?7, elevation=?8, variety=?9, process=?10,
+             flavours=?11 WHERE label=?1 RETURNING added, archived",
+                params![
+                    label,
+                    data.name,
+                    data.roast_date,
+                    data.roaster,
+                    data.origin,
+                    data.producer,
+                    data.farm,
+                    data.elevation,
+                    data.variety,
+                    data.process,
+                    Json(&data.flavours)
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?
             .ok_or_else(|| anyhow!("coffee '{label}' does not exist"))?;
-        ensure_roaster(&transaction, &data.roaster, new_roaster_url)?;
-        let changed = transaction.execute(
-            "UPDATE Coffee SET name=?2, roast_date=?3, roaster=?4, origin=?5,
-             producer=?6, farm=?7, elevation=?8, variety=?9, process=?10,
-             flavours=?11 WHERE label=?1",
-            params![
-                label,
-                data.name,
-                data.roast_date,
-                data.roaster,
-                data.origin,
-                data.producer,
-                data.farm,
-                data.elevation,
-                data.variety,
-                data.process,
-                JsonRef::new(&data.flavours)
-            ],
-        )?;
-        debug_assert_eq!(changed, 1);
         register_flavours(&transaction, &data.flavours)?;
-        let archived = transaction.query_row(
-            "SELECT archived FROM Coffee WHERE label=?1",
-            [label],
-            |row| row.get(0),
-        )?;
         transaction.commit()?;
         Ok(Coffee {
             label,
@@ -327,7 +317,7 @@ impl Database {
         )?;
         Ok(statement
             .query_map([active_only], CoffeeRow::from_row)?
-            .map(|row| row.map(Into::into))
+            .map(|row| row.map(|row| row.0))
             .collect::<rusqlite::Result<_>>()?)
     }
 
@@ -436,7 +426,7 @@ impl Database {
                 params![grinder.label, grinder.name],
             )?;
         }
-        tx.execute("INSERT INTO Brews(coffee,device,grinder,method,occurred,temperature_c,coffee_grams,grind_setting,notes,metadata) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)", params![coffee, data.device, data.grinder, device, data.occurred, data.temperature_c, data.coffee_grams, data.grind_setting, data.notes, data.metadata])?;
+        tx.execute("INSERT INTO Brews(coffee,device,grinder,method,occurred,temperature_c,coffee_grams,grind_setting,notes,metadata) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)", params![coffee, data.device, data.grinder, device, data.occurred, data.temperature_c, data.coffee_grams, data.grind_setting, data.notes, Json(&data.metadata)])?;
         let id = tx.last_insert_rowid();
         tx.commit()?;
         Ok(Brew { id, coffee, data })
@@ -491,7 +481,7 @@ fn insert_coffee(
             data.elevation,
             data.variety,
             data.process,
-            JsonRef::new(&data.flavours)
+            Json(&data.flavours)
         ],
     )?;
     register_flavours(transaction, &data.flavours)

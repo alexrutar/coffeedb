@@ -44,13 +44,12 @@ pub fn render_text(coffee: &Coffee) -> String {
     }
     output.push('\n');
 
-    if coffee.data.process.is_some() || coffee.data.variety.is_some() {
-        let first_value = coffee
-            .data
-            .process
-            .as_deref()
-            .or(coffee.data.variety.as_deref())
-            .unwrap();
+    if let Some(first_value) = coffee
+        .data
+        .process
+        .as_deref()
+        .or(coffee.data.variety.as_deref())
+    {
         write!(output, "{} ", indefinite_article(first_value)).unwrap();
         if let Some(process) = coffee.data.process.as_deref() {
             write!(output, "{} process", process.to_lowercase()).unwrap();
@@ -64,25 +63,21 @@ pub fn render_text(coffee: &Coffee) -> String {
         output.push('\n');
     }
 
-    if coffee.data.producer.is_some() || coffee.data.farm.is_some() {
-        output.push_str("produced ");
-        match (coffee.data.producer.as_deref(), coffee.data.farm.as_deref()) {
-            (Some(producer), Some(farm)) => writeln!(output, "by {producer} @ {farm}").unwrap(),
-            (Some(producer), None) => writeln!(output, "by {producer}").unwrap(),
-            (None, Some(farm)) => writeln!(output, "at {farm}").unwrap(),
-            (None, None) => unreachable!(),
+    match (coffee.data.producer.as_deref(), coffee.data.farm.as_deref()) {
+        (Some(producer), Some(farm)) => {
+            writeln!(output, "produced by {producer} @ {farm}").unwrap()
         }
+        (Some(producer), None) => writeln!(output, "produced by {producer}").unwrap(),
+        (None, Some(farm)) => writeln!(output, "produced at {farm}").unwrap(),
+        (None, None) => {}
     }
     writeln!(output, "roasted by {}", coffee.data.roaster).unwrap();
 
-    if coffee.data.origin.is_some() || coffee.data.elevation.is_some() {
-        output.push('\n');
-        match (coffee.data.origin.as_deref(), coffee.data.elevation) {
-            (Some(origin), Some(elevation)) => writeln!(output, "{origin}  {elevation}").unwrap(),
-            (Some(origin), None) => writeln!(output, "{origin}").unwrap(),
-            (None, Some(elevation)) => writeln!(output, "{elevation}").unwrap(),
-            (None, None) => unreachable!(),
-        }
+    match (coffee.data.origin.as_deref(), coffee.data.elevation) {
+        (Some(origin), Some(elevation)) => writeln!(output, "\n{origin}  {elevation}").unwrap(),
+        (Some(origin), None) => writeln!(output, "\n{origin}").unwrap(),
+        (None, Some(elevation)) => writeln!(output, "\n{elevation}").unwrap(),
+        (None, None) => {}
     }
 
     output
@@ -139,13 +134,12 @@ pub fn render_svg(coffee: &Coffee) -> String {
         output.push_str("</text>\n");
     }
 
-    if has_processing {
-        let first_value = coffee
-            .data
-            .process
-            .as_deref()
-            .or(coffee.data.variety.as_deref())
-            .unwrap();
+    if let Some(first_value) = coffee
+        .data
+        .process
+        .as_deref()
+        .or(coffee.data.variety.as_deref())
+    {
         write!(
             output,
             "    <text x=\"30\" y=\"{processing_y}\" font-size=\"14\" font-style=\"italic\">{} ",
@@ -168,33 +162,36 @@ pub fn render_svg(coffee: &Coffee) -> String {
         output.push_str("</text>\n");
     }
 
-    if has_production {
-        write!(
-            output,
-            "    <text x=\"30\" y=\"{production_y}\" font-size=\"14\" font-style=\"italic\">produced "
-        )
-        .unwrap();
-        match (coffee.data.producer.as_deref(), coffee.data.farm.as_deref()) {
-            (Some(producer), Some(farm)) => {
-                output.push_str("by <tspan font-weight=\"700\">");
-                write_xml(&mut output, producer).unwrap();
-                output.push_str("</tspan> @ <tspan font-weight=\"700\">");
-                write_xml(&mut output, farm).unwrap();
-                output.push_str("</tspan>");
+    match (coffee.data.producer.as_deref(), coffee.data.farm.as_deref()) {
+        (None, None) => {}
+        production => {
+            write!(
+                output,
+                "    <text x=\"30\" y=\"{production_y}\" font-size=\"14\" font-style=\"italic\">produced "
+            )
+            .unwrap();
+            match production {
+                (Some(producer), Some(farm)) => {
+                    output.push_str("by <tspan font-weight=\"700\">");
+                    write_xml(&mut output, producer).unwrap();
+                    output.push_str("</tspan> @ <tspan font-weight=\"700\">");
+                    write_xml(&mut output, farm).unwrap();
+                    output.push_str("</tspan>");
+                }
+                (Some(producer), None) => {
+                    output.push_str("by <tspan font-weight=\"700\">");
+                    write_xml(&mut output, producer).unwrap();
+                    output.push_str("</tspan>");
+                }
+                (None, Some(farm)) => {
+                    output.push_str("at <tspan font-weight=\"700\">");
+                    write_xml(&mut output, farm).unwrap();
+                    output.push_str("</tspan>");
+                }
+                (None, None) => {}
             }
-            (Some(producer), None) => {
-                output.push_str("by <tspan font-weight=\"700\">");
-                write_xml(&mut output, producer).unwrap();
-                output.push_str("</tspan>");
-            }
-            (None, Some(farm)) => {
-                output.push_str("at <tspan font-weight=\"700\">");
-                write_xml(&mut output, farm).unwrap();
-                output.push_str("</tspan>");
-            }
-            (None, None) => unreachable!(),
+            output.push_str("</text>\n");
         }
-        output.push_str("</text>\n");
     }
 
     write!(
@@ -265,13 +262,12 @@ fn estimated_svg_width(coffee: &Coffee) -> usize {
         widest = widest.max(text(&coffee.data.flavours.join(", "), 15.0, false));
     }
 
-    if coffee.data.process.is_some() || coffee.data.variety.is_some() {
-        let first = coffee
-            .data
-            .process
-            .as_deref()
-            .or(coffee.data.variety.as_deref())
-            .unwrap();
+    if let Some(first) = coffee
+        .data
+        .process
+        .as_deref()
+        .or(coffee.data.variety.as_deref())
+    {
         let mut line = text(indefinite_article(first), 14.0, false) + text(" ", 14.0, false);
         if let Some(process) = coffee.data.process.as_deref() {
             line += text(process, 14.0, true) + text(" process", 14.0, false);
@@ -285,9 +281,11 @@ fn estimated_svg_width(coffee: &Coffee) -> usize {
         widest = widest.max(line);
     }
 
-    if coffee.data.producer.is_some() || coffee.data.farm.is_some() {
+    if let production @ (Some(_), _) | production @ (_, Some(_)) =
+        (coffee.data.producer.as_deref(), coffee.data.farm.as_deref())
+    {
         let mut line = text("produced ", 14.0, false);
-        match (coffee.data.producer.as_deref(), coffee.data.farm.as_deref()) {
+        match production {
             (Some(producer), Some(farm)) => {
                 line += text("by ", 14.0, false)
                     + text(producer, 14.0, true)
@@ -300,7 +298,7 @@ fn estimated_svg_width(coffee: &Coffee) -> usize {
             (None, Some(farm)) => {
                 line += text("at ", 14.0, false) + text(farm, 14.0, true);
             }
-            (None, None) => unreachable!(),
+            (None, None) => {}
         }
         widest = widest.max(line);
     }

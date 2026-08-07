@@ -74,9 +74,6 @@ impl FromStr for Label {
             bail!("label prefix must be E, F, or O");
         };
         let digits = &value[1..];
-        if digits.starts_with('0') || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
-            bail!("label index must be a positive decimal integer without leading zeroes");
-        }
         let index = digits.parse::<NonZero<u32>>()?;
         Ok(Self { kind, index })
     }
@@ -107,11 +104,13 @@ mod tests {
         assert_eq!(label.kind(), CoffeeType::Filter);
         assert_eq!(label.index().get(), 23);
         assert_eq!(label.to_string(), "F23");
+
+        assert_eq!("E01".parse::<Label>().unwrap().to_string(), "E1");
     }
 
     #[test]
     fn rejects_noncanonical_labels() {
-        for label in ["", "E", "X1", "e1", "E0", "E01", "E-1", "E1x"] {
+        for label in ["", "E", "X1", "e1", "E0", "E-1", "E1x"] {
             assert!(label.parse::<Label>().is_err(), "accepted {label}");
         }
     }

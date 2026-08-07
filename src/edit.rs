@@ -33,8 +33,8 @@ static WAITING_HARDCODED_NAMES: &[&str] = &[
     "code.cmd -n -w", "atom.exe -w", "subl.exe -w", "notepad.exe",
 ];
 
-fn string_to_cmd(value: String) -> (PathBuf, Vec<String>) {
-    match shell_words::split(&value) {
+fn string_to_cmd(value: &str) -> (PathBuf, Vec<String>) {
+    match shell_words::split(value) {
         Ok(mut parts) if !parts.is_empty() => (parts.remove(0).into(), parts),
         _ => {
             let mut parts = value.split_ascii_whitespace();
@@ -46,7 +46,7 @@ fn string_to_cmd(value: String) -> (PathBuf, Vec<String>) {
     }
 }
 
-fn get_full_editor_cmd(value: String) -> Result<(PathBuf, Vec<String>)> {
+fn get_full_editor_cmd(value: &str) -> Result<(PathBuf, Vec<String>)> {
     let (path, args) = string_to_cmd(value);
     match which(&path) {
         Ok(result) => Ok((result, args)),
@@ -61,14 +61,11 @@ fn get_editor_args() -> Result<(PathBuf, Vec<String>)> {
         .filter_map(env::var_os)
         .filter(|value| !value.is_empty())
         .filter_map(|value| value.into_string().ok())
-        .filter_map(|value| get_full_editor_cmd(value).ok())
-        .next()
+        .find_map(|value| get_full_editor_cmd(&value).ok())
         .or_else(|| {
             WAITING_HARDCODED_NAMES
                 .iter()
-                .map(|value| (*value).to_owned())
-                .filter_map(|value| get_full_editor_cmd(value).ok())
-                .next()
+                .find_map(|value| get_full_editor_cmd(value).ok())
         })
         .ok_or_else(|| Error::from(ErrorKind::NotFound))
 }
@@ -83,21 +80,18 @@ fn edit_bytes_with_builder<B: AsRef<[u8]>>(buffer: B, builder: &Builder) -> Resu
     file.write_all(buffer.as_ref())?;
     let path = file.into_temp_path();
     edit_file(&path)?;
-    let edited = fs::read(&path)?;
-    path.close()?;
-    Ok(edited)
+    fs::read(path)
 }
 
 fn edit_file<P: AsRef<Path>>(file: P) -> Result<()> {
     let (editor, args) = get_editor_args()?;
     let status = Command::new(&editor)
-        .args(&args)
+        .args(args)
         .arg(file.as_ref())
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
-        .output()?
-        .status;
+        .status()?;
 
     if status.success() {
         Ok(())
@@ -116,7 +110,7 @@ mod tests {
     #[test]
     fn parses_quoted_editor_commands() {
         let (path, args) =
-            string_to_cmd(r#""/Applications/Foo Bar.app/bin/editor" --wait "set ft=toml""#.into());
+            string_to_cmd(r#""/Applications/Foo Bar.app/bin/editor" --wait "set ft=toml""#);
         assert_eq!(path, PathBuf::from("/Applications/Foo Bar.app/bin/editor"));
         assert_eq!(args, ["--wait", "set ft=toml"]);
     }

@@ -188,9 +188,6 @@ fn complete_devices(current: &OsStr) -> Vec<CompletionCandidate> {
 }
 
 fn add_brew(database: &mut Database, coffee: Label, requested: DeviceLabel) -> Result<()> {
-    if database.get(coffee)?.is_none() {
-        bail!("coffee '{coffee}' does not exist");
-    }
     let (initial_method, pending) = match database.device(&requested)? {
         Some(device) => (device.method, None),
         None => {
@@ -227,7 +224,7 @@ fn add_brew(database: &mut Database, coffee: Label, requested: DeviceLabel) -> R
         }
     };
     let mut source = BrewData::draft(&requested, initial_method);
-    loop {
+    'editing: loop {
         let Some((data, resolved_pending)) =
             edit_brew_record(database, &source, initial_method, pending.as_ref())?
         else {
@@ -239,7 +236,7 @@ fn add_brew(database: &mut Database, coffee: Label, requested: DeviceLabel) -> R
                 let value = prompt("Descriptive name (or 'edit' to edit the brew again)")?;
                 if matches!(value.as_str(), "e" | "edit") {
                     source = data.to_toml()?;
-                    break None;
+                    continue 'editing;
                 }
                 if !value.is_empty() {
                     let grinder = Grinder {
@@ -256,21 +253,14 @@ fn add_brew(database: &mut Database, coffee: Label, requested: DeviceLabel) -> R
                         break Some(grinder);
                     }
                     source = data.to_toml()?;
-                    break None;
+                    continue 'editing;
                 }
                 eprintln!("Grinder name must not be empty.");
             }
         } else {
-            Some(Grinder {
-                label: data.grinder.clone(),
-                name: String::new(),
-            })
+            None
         };
-        let Some(grinder_choice) = new_grinder else {
-            continue;
-        };
-        let registration = (!grinder_choice.name.is_empty()).then_some(&grinder_choice);
-        let brew = database.add_brew(coffee, data, resolved_pending, registration)?;
+        let brew = database.add_brew(coffee, data, resolved_pending, new_grinder.as_ref())?;
         print!("{}", brew.to_toml()?);
         return Ok(());
     }

@@ -120,7 +120,8 @@ pub struct EspressoMetadata {
     pub duration_seconds: f64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
 pub enum BrewMetadata {
     Pourover(PouroverMetadata),
     Immersion(ImmersionMetadata),
@@ -140,14 +141,6 @@ impl BrewMetadata {
             BrewMethod::Pourover => Self::Pourover(serde_json::from_str(json)?),
             BrewMethod::Immersion => Self::Immersion(serde_json::from_str(json)?),
             BrewMethod::Espresso => Self::Espresso(serde_json::from_str(json)?),
-        })
-    }
-    #[cfg(test)]
-    pub fn to_json(&self) -> Result<String> {
-        Ok(match self {
-            Self::Pourover(v) => serde_json::to_string(v)?,
-            Self::Immersion(v) => serde_json::to_string(v)?,
-            Self::Espresso(v) => serde_json::to_string(v)?,
         })
     }
     #[cfg(test)]
@@ -341,7 +334,7 @@ pub struct Brew {
 
 impl Brew {
     pub fn to_toml(&self) -> Result<String> {
-        Ok(toml::to_string_pretty(self)?)
+        toml::to_string_pretty(self).map_err(Into::into)
     }
 }
 
@@ -492,7 +485,11 @@ mod tests {
         );
         assert_eq!(d.metadata.total_volume_ml(), Some(100.0));
         assert!(
-            BrewMetadata::from_json(BrewMethod::Pourover, &d.metadata.to_json().unwrap()).unwrap()
+            BrewMetadata::from_json(
+                BrewMethod::Pourover,
+                &serde_json::to_string(&d.metadata).unwrap()
+            )
+            .unwrap()
                 == d.metadata
         );
         let e = BrewMetadata::Espresso(EspressoMetadata {
