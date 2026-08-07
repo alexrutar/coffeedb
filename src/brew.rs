@@ -142,6 +142,7 @@ impl BrewMetadata {
             BrewMethod::Espresso => Self::Espresso(serde_json::from_str(json)?),
         })
     }
+    #[cfg(test)]
     pub fn to_json(&self) -> Result<String> {
         Ok(match self {
             Self::Pourover(v) => serde_json::to_string(v)?,
@@ -149,14 +150,14 @@ impl BrewMetadata {
             Self::Espresso(v) => serde_json::to_string(v)?,
         })
     }
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn total_volume_ml(&self) -> Option<f64> {
         match self {
             Self::Pourover(v) => Some(v.pours.iter().map(|(_, ml)| ml).sum()),
             _ => None,
         }
     }
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn brew_ratio(&self, dose: f64) -> Option<f64> {
         match self {
             Self::Espresso(v) => Some(v.beverage_grams / dose),

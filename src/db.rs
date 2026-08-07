@@ -1,12 +1,15 @@
-use std::{fmt, num::NonZero, path::Path, str::FromStr};
+use std::{num::NonZero, path::Path};
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Local};
 use rusqlite::{
-    Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params, types::Type,
+    Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
 };
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use url::Url;
+
+mod types;
+pub use types::CoffeeElevation;
+use types::{BrewDeviceRow, BrewRow, CoffeeRow, JsonRef};
 
 use crate::{
     brew::{Brew, BrewData, BrewDevice, BrewMethod, DeviceLabel, Grinder, GrinderLabel},
@@ -95,92 +98,6 @@ CREATE INDEX Brews_grinder_idx ON Brews(grinder);
 
 // First four bytes of SHA-256("coffeedb"), interpreted as a big-endian integer.
 const APPLICATION_ID: i32 = 0x75af_f574;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CoffeeElevation {
-    Single(u16),
-    Range(u16, u16),
-}
-
-impl FromStr for CoffeeElevation {
-    type Err = anyhow::Error;
-
-    fn from_str(value: &str) -> Result<Self> {
-        fn parse_half(value: &str) -> Result<(u16, bool)> {
-            let parts: Vec<_> = value.split_whitespace().collect();
-            if parts.len() != 1 && parts.len() != 2 {
-                bail!("invalid elevation");
-            }
-            if parts.get(1).is_some_and(|unit| *unit != "masl") {
-                bail!("invalid elevation");
-            }
-            let number = parts[0]
-                .parse::<u16>()
-                .map_err(|_| anyhow!("invalid elevation: '{}' does not fit in a u16", parts[0]))?;
-            Ok((number, parts.len() == 2))
-        }
-
-        let halves: Vec<_> = value.split('-').map(str::trim).collect();
-        match halves.as_slice() {
-            [single] => Ok(Self::Single(parse_half(single)?.0)),
-            [start, end] => {
-                let (start, start_has_unit) = parse_half(start)?;
-                let (end, end_has_unit) = parse_half(end)?;
-                if start_has_unit && !end_has_unit {
-                    bail!("invalid elevation");
-                }
-                Ok(Self::Range(start, end))
-            }
-            _ => bail!("invalid elevation"),
-        }
-    }
-}
-
-impl fmt::Display for CoffeeElevation {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Single(value) => write!(formatter, "{value} masl"),
-            Self::Range(start, end) => write!(formatter, "{start} - {end} masl"),
-        }
-    }
-}
-
-impl Serialize for CoffeeElevation {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.collect_str(self)
-    }
-}
-
-impl<'de> Deserialize<'de> for CoffeeElevation {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        String::deserialize(deserializer)?
-            .parse()
-            .map_err(serde::de::Error::custom)
-    }
-}
-
-impl rusqlite::types::ToSql for CoffeeElevation {
-    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
-        Ok(self.to_string().into())
-    }
-}
-
-impl rusqlite::types::FromSql for CoffeeElevation {
-    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
-        value.as_str()?.parse().map_err(|error: anyhow::Error| {
-            rusqlite::types::FromSqlError::Other(Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                error.to_string(),
-            )))
-        })
-    }
-}
 
 pub struct Database {
     connection: Connection,
@@ -327,49 +244,17 @@ impl Database {
     }
 
     pub fn get(&self, label: Label) -> Result<Option<Coffee>> {
-        let row =
-            self.connection
-                .query_row(
-                    "SELECT added, name, roast_date, roaster, origin, producer, farm, elevation,
-                        variety, process, flavours, archived
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT label, added, name, roast_date, roaster, origin, producer, farm,
+                        elevation, variety, process, flavours, archived
                  FROM Coffee WHERE label = ?1",
-                    [label],
-                    |row| {
-                        Ok((
-                            row.get::<_, DateTime<Local>>(0)?,
-                            CoffeeData {
-                                name: row.get(1)?,
-                                roast_date: row.get(2)?,
-                                roaster: row.get(3)?,
-                                origin: row.get(4)?,
-                                producer: row.get(5)?,
-                                farm: row.get(6)?,
-                                elevation: row.get(7)?,
-                                variety: row.get(8)?,
-                                process: row.get(9)?,
-                                flavours: serde_json::from_str(&row.get::<_, String>(10)?)
-                                    .map_err(|error| {
-                                        rusqlite::Error::FromSqlConversionFailure(
-                                            10,
-                                            Type::Text,
-                                            Box::new(error),
-                                        )
-                                    })?,
-                            },
-                            row.get::<_, bool>(11)?,
-                        ))
-                    },
-                )
-                .optional()?;
-        let Some((added, data, archived)) = row else {
-            return Ok(None);
-        };
-        Ok(Some(Coffee {
-            label,
-            added,
-            archived,
-            data,
-        }))
+                [label],
+                CoffeeRow::from_row,
+            )
+            .optional()?
+            .map(Into::into))
     }
 
     pub fn update(
@@ -389,7 +274,6 @@ impl Database {
             .optional()?
             .ok_or_else(|| anyhow!("coffee '{label}' does not exist"))?;
         ensure_roaster(&transaction, &data.roaster, new_roaster_url)?;
-        let flavours = serde_json::to_string(&data.flavours)?;
         let changed = transaction.execute(
             "UPDATE Coffee SET name=?2, roast_date=?3, roaster=?4, origin=?5,
              producer=?6, farm=?7, elevation=?8, variety=?9, process=?10,
@@ -405,7 +289,7 @@ impl Database {
                 data.elevation,
                 data.variety,
                 data.process,
-                flavours
+                JsonRef::new(&data.flavours)
             ],
         )?;
         debug_assert_eq!(changed, 1);
@@ -442,29 +326,8 @@ impl Database {
                       CAST(substr(label, 2) AS INTEGER)",
         )?;
         Ok(statement
-            .query_map([active_only], |row| {
-                let flavours =
-                    serde_json::from_str(&row.get::<_, String>(11)?).map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(11, Type::Text, Box::new(error))
-                    })?;
-                Ok(Coffee {
-                    label: row.get(0)?,
-                    added: row.get(1)?,
-                    archived: row.get(12)?,
-                    data: CoffeeData {
-                        name: row.get(2)?,
-                        roast_date: row.get(3)?,
-                        roaster: row.get(4)?,
-                        origin: row.get(5)?,
-                        producer: row.get(6)?,
-                        farm: row.get(7)?,
-                        elevation: row.get(8)?,
-                        variety: row.get(9)?,
-                        process: row.get(10)?,
-                        flavours,
-                    },
-                })
-            })?
+            .query_map([active_only], CoffeeRow::from_row)?
+            .map(|row| row.map(Into::into))
             .collect::<rusqlite::Result<_>>()?)
     }
 
@@ -492,21 +355,12 @@ impl Database {
         Ok(self
             .connection
             .query_row(
-                "SELECT name, method FROM BrewDevices WHERE label=?1",
+                "SELECT label, name, method FROM BrewDevices WHERE label=?1",
                 [label.as_str()],
-                |row| {
-                    let method = row
-                        .get::<_, String>(1)?
-                        .parse()
-                        .map_err(|e: anyhow::Error| sql_conversion(1, e))?;
-                    Ok(BrewDevice {
-                        label: label.clone(),
-                        name: row.get(0)?,
-                        method,
-                    })
-                },
+                BrewDeviceRow::from_row,
             )
-            .optional()?)
+            .optional()?
+            .map(|row| row.0))
     }
 
     pub fn list_devices(&self) -> Result<Vec<BrewDevice>> {
@@ -514,21 +368,8 @@ impl Database {
             .connection
             .prepare("SELECT label, name, method FROM BrewDevices ORDER BY label")?;
         Ok(statement
-            .query_map([], |row| {
-                let raw: String = row.get(0)?;
-                let label = raw
-                    .parse()
-                    .map_err(|e: anyhow::Error| sql_conversion(0, e))?;
-                let raw_method: String = row.get(2)?;
-                let method = raw_method
-                    .parse()
-                    .map_err(|e: anyhow::Error| sql_conversion(2, e))?;
-                Ok(BrewDevice {
-                    label,
-                    name: row.get(1)?,
-                    method,
-                })
-            })?
+            .query_map([], BrewDeviceRow::from_row)?
+            .map(|row| row.map(|row| row.0))
             .collect::<rusqlite::Result<_>>()?)
     }
 
@@ -572,24 +413,19 @@ impl Database {
             }
             tx.execute(
                 "INSERT INTO BrewDevices(label,name,method) VALUES(?1,?2,?3)",
-                params![
-                    device.label.as_str(),
-                    device.name,
-                    device.method.to_string()
-                ],
+                params![device.label, device.name, device.method],
             )?;
         }
         let device = tx
             .query_row(
                 "SELECT method FROM BrewDevices WHERE label=?1",
-                [data.device.as_str()],
-                |r| r.get::<_, String>(0),
+                [&data.device],
+                |r| r.get::<_, BrewMethod>(0),
             )
             .optional()?
             .ok_or_else(|| anyhow!("device '{}' does not exist", data.device))?;
-        let method: BrewMethod = device.parse()?;
-        if method != data.metadata.method() {
-            bail!("brew metadata does not match device method '{method}'");
+        if device != data.metadata.method() {
+            bail!("brew metadata does not match device method '{device}'");
         }
         if let Some(grinder) = new_grinder {
             if grinder.name.is_empty() {
@@ -597,11 +433,10 @@ impl Database {
             }
             tx.execute(
                 "INSERT INTO Grinders(label,name) VALUES(?1,?2)",
-                params![grinder.label.as_str(), grinder.name],
+                params![grinder.label, grinder.name],
             )?;
         }
-        let metadata = data.metadata.to_json()?;
-        tx.execute("INSERT INTO Brews(coffee,device,grinder,method,occurred,temperature_c,coffee_grams,grind_setting,notes,metadata) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)", params![coffee, data.device.as_str(), data.grinder.as_str(), method.to_string(), data.occurred, data.temperature_c, data.coffee_grams, data.grind_setting, data.notes, metadata])?;
+        tx.execute("INSERT INTO Brews(coffee,device,grinder,method,occurred,temperature_c,coffee_grams,grind_setting,notes,metadata) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)", params![coffee, data.device, data.grinder, device, data.occurred, data.temperature_c, data.coffee_grams, data.grind_setting, data.notes, data.metadata])?;
         let id = tx.last_insert_rowid();
         tx.commit()?;
         Ok(Brew { id, coffee, data })
@@ -617,53 +452,12 @@ impl Database {
             bail!("coffee '{coffee}' does not exist");
         }
         let mut statement = self.connection.prepare("SELECT id,coffee,device,method,occurred,temperature_c,coffee_grams,grinder,grind_setting,notes,metadata FROM Brews WHERE ?1 IS NULL OR coffee=?1 ORDER BY occurred DESC, id DESC LIMIT ?2")?;
-        let brews = statement.query_map(params![coffee, limit], |row| {
-            let method_raw: String = row.get(3)?;
-            let method: BrewMethod = method_raw
-                .parse()
-                .map_err(|e: anyhow::Error| sql_conversion(3, e))?;
-            let metadata_raw: String = row.get(10)?;
-            let metadata = crate::brew::BrewMetadata::from_json(method, &metadata_raw)
-                .map_err(|e| sql_conversion(10, e))?;
-            let occurred = row.get(4)?;
-            let device_raw: String = row.get(2)?;
-            let device = device_raw
-                .parse()
-                .map_err(|e: anyhow::Error| sql_conversion(2, e))?;
-            Ok(Brew {
-                id: row.get(0)?,
-                coffee: row.get(1)?,
-                data: BrewData {
-                    device,
-                    occurred,
-                    temperature_c: row.get(5)?,
-                    coffee_grams: row.get(6)?,
-                    grinder: row
-                        .get::<_, String>(7)?
-                        .parse()
-                        .map_err(|e: anyhow::Error| sql_conversion(7, e))?,
-                    grind_setting: row.get(8)?,
-                    notes: row.get(9)?,
-                    metadata,
-                },
-            })
-        })?;
+        let brews = statement.query_map(params![coffee, limit], BrewRow::from_row)?;
         for brew in brews {
-            callback(brew?);
+            callback(brew?.0);
         }
         Ok(())
     }
-}
-
-fn sql_conversion(column: usize, error: anyhow::Error) -> rusqlite::Error {
-    rusqlite::Error::FromSqlConversionFailure(
-        column,
-        Type::Text,
-        Box::new(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            error.to_string(),
-        )),
-    )
 }
 
 fn ensure_roaster(transaction: &Transaction<'_>, name: &str, url: Option<&Url>) -> Result<()> {
@@ -680,7 +474,6 @@ fn insert_coffee(
     added: &DateTime<Local>,
     data: &CoffeeData,
 ) -> Result<()> {
-    let flavours = serde_json::to_string(&data.flavours)?;
     transaction.execute(
         "INSERT INTO Coffee
          (label, added, name, roast_date, roaster, origin, producer, farm, elevation, variety,
@@ -698,7 +491,7 @@ fn insert_coffee(
             data.elevation,
             data.variety,
             data.process,
-            flavours
+            JsonRef::new(&data.flavours)
         ],
     )?;
     register_flavours(transaction, &data.flavours)
