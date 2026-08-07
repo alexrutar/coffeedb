@@ -1,4 +1,5 @@
 mod app;
+mod brew;
 mod db;
 mod edit;
 mod label;

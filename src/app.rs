@@ -14,6 +14,7 @@ use etcetera::{AppStrategy, AppStrategyArgs, choose_app_strategy};
 use url::Url;
 
 use crate::{
+    brew::{BrewData, BrewDevice, BrewMethod, DeviceLabel},
     db::Database,
     edit::{Builder, edit_with_builder},
     label::{CoffeeType, Label},
@@ -74,6 +75,27 @@ enum Command {
         #[arg(long, value_name = "PATH")]
         out: Option<PathBuf>,
     },
+    /// Add and list coffee brews.
+    Brew {
+        #[command(subcommand)]
+        command: BrewCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum BrewCommand {
+    /// Add a brew using an editor.
+    Add {
+        #[arg(add = ArgValueCompleter::new(complete_labels))]
+        label: Label,
+        #[arg(add = ArgValueCompleter::new(complete_devices))]
+        device: DeviceLabel,
+    },
+    /// List brews for a coffee, newest first.
+    List {
+        #[arg(add = ArgValueCompleter::new(complete_labels))]
+        label: Label,
+    },
 }
 
 impl Cli {
@@ -90,8 +112,147 @@ impl Cli {
             Command::Edit { label } => edit(&mut database, label),
             Command::List { template, flavours } => list(&database, &template, flavours),
             Command::Get { label, format, out } => get(&database, label, format, out),
+            Command::Brew { command } => match command {
+                BrewCommand::Add { label, device } => add_brew(&mut database, label, device),
+                BrewCommand::List { label } => list_brews(&database, label),
+            },
         }
     }
+}
+
+fn complete_devices(current: &OsStr) -> Vec<CompletionCandidate> {
+    let Some(current) = current.to_str() else {
+        return Vec::new();
+    };
+    let Some(path) = completion_database_path() else {
+        return Vec::new();
+    };
+    let Ok(database) = Database::open_read_only(&path) else {
+        return Vec::new();
+    };
+    database
+        .list_devices()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|d| d.label.as_str().starts_with(current))
+        .map(|d| {
+            CompletionCandidate::new(d.label.to_string())
+                .help(Some(StyledStr::from(format!("{} ({})", d.name, d.method))))
+        })
+        .collect()
+}
+
+fn add_brew(database: &mut Database, coffee: Label, requested: DeviceLabel) -> Result<()> {
+    if database.get(coffee)?.is_none() {
+        bail!("coffee '{coffee}' does not exist");
+    }
+    let (initial_method, pending) = match database.device(&requested)? {
+        Some(device) => (device.method, None),
+        None => {
+            eprintln!("Device '{requested}' is not registered.");
+            let name = loop {
+                let value = prompt("Descriptive name")?;
+                if !value.is_empty() {
+                    break value;
+                }
+                eprintln!("Device name must not be empty.");
+            };
+            let method = loop {
+                let value = prompt("Method (pourover, immersion, or espresso)")?;
+                match value.parse() {
+                    Ok(method) => break method,
+                    Err(error) => eprintln!("Invalid method: {error}"),
+                }
+            };
+            let device = BrewDevice {
+                label: requested.clone(),
+                name,
+                method,
+            };
+            if !confirm(
+                &format!(
+                    "Register device '{}' as '{}' ({})?",
+                    device.label, device.name, device.method
+                ),
+                false,
+            )? {
+                bail!("device registration cancelled");
+            }
+            (method, Some(device))
+        }
+    };
+    let mut source = BrewData::draft(&requested, initial_method);
+    loop {
+        let Some((data, resolved_pending)) =
+            edit_brew_record(database, &source, initial_method, pending.as_ref())?
+        else {
+            bail!("no brew was added");
+        };
+        if !database.grinder_exists(&data.grinder)?
+            && !confirm(&format!("Register grinder '{}'?", data.grinder), false)?
+        {
+            source = data.to_toml()?;
+            continue;
+        }
+        let register_grinder = !database.grinder_exists(&data.grinder)?;
+        let brew = database.add_brew(coffee, data, resolved_pending, register_grinder)?;
+        print!("{}", brew.to_toml()?);
+        return Ok(());
+    }
+}
+
+fn edit_brew_record<'a>(
+    database: &Database,
+    source: &str,
+    initial_method: BrewMethod,
+    pending: Option<&'a BrewDevice>,
+) -> Result<Option<(BrewData, Option<&'a BrewDevice>)>> {
+    let mut builder = Builder::new();
+    builder.suffix(".toml");
+    let mut response = source.to_owned();
+    loop {
+        let user_text = edit_with_builder(&response, &builder).context("failed to edit brew")?;
+        if user_text == response {
+            return Ok(None);
+        }
+        let attempt = (|| -> Result<(BrewData, Option<&BrewDevice>)> {
+            let table: toml::Table = toml::from_str(&user_text)?;
+            let raw = table
+                .get("device")
+                .and_then(toml::Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("'device' must be a string"))?;
+            let label: DeviceLabel = raw.parse()?;
+            let (method, registration) = if pending.is_some_and(|d| d.label == label) {
+                (initial_method, pending)
+            } else {
+                let device = database.device(&label)?.ok_or_else(|| {
+                    anyhow::anyhow!("replacement device '{label}' is not registered")
+                })?;
+                (device.method, None)
+            };
+            let data = BrewData::parse_for_method(&user_text, method)
+                .with_context(|| format!("metadata does not match device method '{method}'"))?;
+            Ok((data, registration))
+        })();
+        match attempt {
+            Ok(value) => return Ok(Some(value)),
+            Err(error) => eprintln!("Contents invalid: {error:#}"),
+        }
+        if !confirm("Continue editing?", true)? {
+            return Ok(None);
+        }
+        response = user_text;
+    }
+}
+
+fn list_brews(database: &Database, coffee: Label) -> Result<()> {
+    let stdout = io::stdout();
+    let mut output = stdout.lock();
+    for brew in database.list_brews(coffee)? {
+        writeln!(output, "[[brews]]")?;
+        writeln!(output, "{}", brew.to_toml()?.trim_end())?;
+    }
+    Ok(())
 }
 
 fn default_database_path() -> Result<PathBuf> {
