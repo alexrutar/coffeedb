@@ -10,6 +10,7 @@ use crate::{db::CoffeeElevation, label::Label};
 pub struct Coffee {
     pub label: Label,
     pub added: DateTime<Local>,
+    pub archived: bool,
     pub data: CoffeeData,
 }
 

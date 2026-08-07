@@ -377,6 +377,7 @@ mod tests {
         Coffee {
             label: Label::new(CoffeeType::Filter, NonZero::new(1).unwrap()),
             added: Local::now(),
+            archived: false,
             data: CoffeeData {
                 name: "House Coffee".into(),
                 roaster: "Dak".into(),

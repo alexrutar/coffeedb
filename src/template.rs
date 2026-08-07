@@ -243,6 +243,7 @@ mod tests {
         Coffee {
             label: crate::label::Label::new(CoffeeType::Filter, NonZero::new(1).unwrap()),
             added: chrono::Local::now(),
+            archived: false,
             data: CoffeeData {
                 name: "Lot One".into(),
                 roast_date: None,

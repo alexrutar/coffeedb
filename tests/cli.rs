@@ -544,3 +544,109 @@ fn printing_unknown_coffee_exits_with_error() -> Result<()> {
     directory.close()?;
     Ok(())
 }
+
+#[test]
+fn archives_filters_and_unarchives_beans() -> Result<()> {
+    let directory = TempDir::new()?;
+    let database = directory.path().join("coffeedb.db");
+    let record = directory.path().join("record.toml");
+    std::fs::write(
+        &record,
+        "name = \"Test Coffee\"\nroaster = \"Test Roaster\"\nflavours = []\n",
+    )?;
+
+    for _ in 0..2 {
+        Command::cargo_bin("coffeedb")?
+            .args([
+                "--database",
+                database.to_str().unwrap(),
+                "bean",
+                "add",
+                "filter",
+            ])
+            .env("EDITOR", format!("cp {}", record.display()))
+            .write_stdin("\n")
+            .assert()
+            .success();
+    }
+
+    Command::cargo_bin("coffeedb")?
+        .args([
+            "--database",
+            database.to_str().unwrap(),
+            "bean",
+            "archive",
+            "F1",
+        ])
+        .assert()
+        .success();
+
+    Command::cargo_bin("coffeedb")?
+        .args([
+            "--database",
+            database.to_str().unwrap(),
+            "bean",
+            "list",
+            "--template",
+            "{%label}",
+        ])
+        .assert()
+        .success()
+        .stdout("F1\nF2\n");
+    Command::cargo_bin("coffeedb")?
+        .args([
+            "--database",
+            database.to_str().unwrap(),
+            "bean",
+            "list",
+            "--active",
+            "--template",
+            "{%label}",
+        ])
+        .assert()
+        .success()
+        .stdout("F2\n");
+
+    Command::cargo_bin("coffeedb")?
+        .args([
+            "--",
+            "coffeedb",
+            "--database",
+            database.to_str().unwrap(),
+            "bean",
+            "edit",
+            "F",
+        ])
+        .env("COMPLETE", "fish")
+        .assert()
+        .success()
+        .stdout("F2\tTest Coffee (by Test Roaster)\n");
+
+    Command::cargo_bin("coffeedb")?
+        .args([
+            "--database",
+            database.to_str().unwrap(),
+            "bean",
+            "archive",
+            "F1",
+            "--unarchive",
+        ])
+        .assert()
+        .success();
+    Command::cargo_bin("coffeedb")?
+        .args([
+            "--database",
+            database.to_str().unwrap(),
+            "bean",
+            "list",
+            "--active",
+            "--template",
+            "{%label}",
+        ])
+        .assert()
+        .success()
+        .stdout("F1\nF2\n");
+
+    directory.close()?;
+    Ok(())
+}

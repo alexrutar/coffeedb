@@ -81,6 +81,9 @@ enum BeanCommand {
         /// List registered flavours instead of coffees.
         #[arg(long)]
         flavours: bool,
+        /// Exclude archived coffees.
+        #[arg(long, conflicts_with = "flavours")]
+        active: bool,
     },
     /// Get a human-readable description of an existing coffee.
     Get {
@@ -93,6 +96,15 @@ enum BeanCommand {
         /// Write the output to a file instead of standard output.
         #[arg(long, value_name = "PATH")]
         out: Option<PathBuf>,
+    },
+    /// Archive or unarchive a coffee.
+    Archive {
+        /// Coffee label, such as F3.
+        #[arg(add = ArgValueCompleter::new(complete_labels))]
+        label: Label,
+        /// Restore the coffee to active status.
+        #[arg(long)]
+        unarchive: bool,
     },
 }
 
@@ -112,6 +124,9 @@ enum BrewCommand {
         /// Output format.
         #[arg(short, long, value_enum, default_value_t)]
         format: BrewListFormat,
+        /// Show only the N most recent brews.
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(i64).range(0..))]
+        limit: Option<i64>,
     },
 }
 
@@ -128,12 +143,23 @@ impl Cli {
             Command::Bean { command } => match command {
                 BeanCommand::Add { kind } => add(&mut database, kind),
                 BeanCommand::Edit { label } => edit(&mut database, label),
-                BeanCommand::List { template, flavours } => list(&database, &template, flavours),
+                BeanCommand::List {
+                    template,
+                    flavours,
+                    active,
+                } => list(&database, &template, flavours, active),
                 BeanCommand::Get { label, format, out } => get(&database, label, format, out),
+                BeanCommand::Archive { label, unarchive } => {
+                    database.set_archived(label, !unarchive)
+                }
             },
             Command::Brew { command } => match command {
                 BrewCommand::Add { label, device } => add_brew(&mut database, label, device),
-                BrewCommand::List { label, format } => list_brews(&database, label, format),
+                BrewCommand::List {
+                    label,
+                    format,
+                    limit,
+                } => list_brews(&database, label, format, limit.unwrap_or(-1)),
             },
         }
     }
@@ -302,15 +328,24 @@ enum BrewListFormat {
     Json,
 }
 
-fn list_brews(database: &Database, coffee: Option<Label>, format: BrewListFormat) -> Result<()> {
+fn list_brews(
+    database: &Database,
+    coffee: Option<Label>,
+    format: BrewListFormat,
+    limit: i64,
+) -> Result<()> {
     let stdout = io::stdout();
     let mut output = stdout.lock();
-    let log = BrewLog { database, coffee };
+    let log = BrewLog {
+        database,
+        coffee,
+        limit,
+    };
     match format {
         BrewListFormat::Text => {
             let mut first = true;
             let mut render_error = None;
-            database.map_brews(coffee, |brew| {
+            database.map_brews(coffee, limit, |brew| {
                 if render_error.is_some() {
                     return;
                 }
@@ -414,6 +449,7 @@ fn render_brew_text(database: &Database, brew: &crate::brew::Brew) -> Result<Str
 struct BrewLog<'a> {
     database: &'a Database,
     coffee: Option<Label>,
+    limit: i64,
 }
 
 struct BrewSequence<'a>(&'a BrewLog<'a>);
@@ -439,7 +475,7 @@ impl Serialize for BrewSequence<'_> {
         let mut serialization_error = None;
         self.0
             .database
-            .map_brews(self.0.coffee, |brew| {
+            .map_brews(self.0.coffee, self.0.limit, |brew| {
                 if serialization_error.is_none()
                     && let Err(error) = sequence.serialize_element(&brew)
                 {
@@ -471,7 +507,7 @@ impl Serialize for JsonBrewLog<'_> {
                 let mut serialization_error = None;
                 self.0
                     .database
-                    .map_brews(self.0.coffee, |brew| {
+                    .map_brews(self.0.coffee, self.0.limit, |brew| {
                         if serialization_error.is_none()
                             && let Err(error) = sequence.serialize_element(&JsonBrew(&brew))
                         {
@@ -540,7 +576,7 @@ fn complete_labels(current: &OsStr) -> Vec<CompletionCandidate> {
     let Ok(template) = CoffeeTemplate::from_str(r#"{%name} (by {%roaster})"#) else {
         return Vec::new();
     };
-    let Ok(coffees) = database.list() else {
+    let Ok(coffees) = database.list_active() else {
         return Vec::new();
     };
 
@@ -605,7 +641,12 @@ fn edit(database: &mut Database, label: Label) -> Result<()> {
     }
 }
 
-fn list(database: &Database, template: &CoffeeTemplate, flavours: bool) -> Result<()> {
+fn list(
+    database: &Database,
+    template: &CoffeeTemplate,
+    flavours: bool,
+    active: bool,
+) -> Result<()> {
     let stdout = io::stdout();
     let mut output = stdout.lock();
     if flavours {
@@ -614,7 +655,12 @@ fn list(database: &Database, template: &CoffeeTemplate, flavours: bool) -> Resul
         }
         return Ok(());
     }
-    for coffee in database.list()? {
+    let coffees = if active {
+        database.list_active()?
+    } else {
+        database.list()?
+    };
+    for coffee in coffees {
         writeln!(output, "{}", template.render(&coffee)?.trim_end())?;
     }
     Ok(())

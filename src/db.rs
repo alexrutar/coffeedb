@@ -32,7 +32,8 @@ CREATE TABLE Coffee (
   elevation TEXT,
   variety TEXT,
   process TEXT,
-  flavours TEXT NOT NULL CHECK (json_valid(flavours))
+  flavours TEXT NOT NULL CHECK (json_valid(flavours)),
+  archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0, 1))
 ) STRICT;
 
 CREATE TABLE Flavours (
@@ -248,6 +249,10 @@ impl Database {
             }
             if version == 0 {
                 let transaction = self.connection.transaction()?;
+                transaction.execute(
+                    "ALTER TABLE Coffee ADD COLUMN archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0, 1))",
+                    [],
+                )?;
                 transaction.execute_batch(BREW_SCHEMA)?;
                 transaction.pragma_update(None, "user_version", LATEST_VERSION)?;
                 transaction.commit()?;
@@ -313,7 +318,12 @@ impl Database {
         let added = Local::now();
         insert_coffee(&transaction, label, &added, &data)?;
         transaction.commit()?;
-        Ok(Coffee { label, added, data })
+        Ok(Coffee {
+            label,
+            added,
+            archived: false,
+            data,
+        })
     }
 
     pub fn get(&self, label: Label) -> Result<Option<Coffee>> {
@@ -321,7 +331,7 @@ impl Database {
             self.connection
                 .query_row(
                     "SELECT added, name, roast_date, roaster, origin, producer, farm, elevation,
-                        variety, process, flavours
+                        variety, process, flavours, archived
                  FROM Coffee WHERE label = ?1",
                     [label],
                     |row| {
@@ -346,14 +356,20 @@ impl Database {
                                         )
                                     })?,
                             },
+                            row.get::<_, bool>(11)?,
                         ))
                     },
                 )
                 .optional()?;
-        let Some((added, data)) = row else {
+        let Some((added, data, archived)) = row else {
             return Ok(None);
         };
-        Ok(Some(Coffee { label, added, data }))
+        Ok(Some(Coffee {
+            label,
+            added,
+            archived,
+            data,
+        }))
     }
 
     pub fn update(
@@ -394,20 +410,39 @@ impl Database {
         )?;
         debug_assert_eq!(changed, 1);
         register_flavours(&transaction, &data.flavours)?;
+        let archived = transaction.query_row(
+            "SELECT archived FROM Coffee WHERE label=?1",
+            [label],
+            |row| row.get(0),
+        )?;
         transaction.commit()?;
-        Ok(Coffee { label, added, data })
+        Ok(Coffee {
+            label,
+            added,
+            archived,
+            data,
+        })
     }
 
     pub fn list(&self) -> Result<Vec<Coffee>> {
+        self.list_coffees(false)
+    }
+
+    pub fn list_active(&self) -> Result<Vec<Coffee>> {
+        self.list_coffees(true)
+    }
+
+    fn list_coffees(&self, active_only: bool) -> Result<Vec<Coffee>> {
         let mut statement = self.connection.prepare(
             "SELECT label, added, name, roast_date, roaster, origin, producer, farm,
-                    elevation, variety, process, flavours
+                    elevation, variety, process, flavours, archived
              FROM Coffee
+             WHERE NOT ?1 OR archived=0
              ORDER BY CASE substr(label, 1, 1) WHEN 'E' THEN 0 WHEN 'F' THEN 1 ELSE 2 END,
                       CAST(substr(label, 2) AS INTEGER)",
         )?;
         Ok(statement
-            .query_map([], |row| {
+            .query_map([active_only], |row| {
                 let flavours =
                     serde_json::from_str(&row.get::<_, String>(11)?).map_err(|error| {
                         rusqlite::Error::FromSqlConversionFailure(11, Type::Text, Box::new(error))
@@ -415,6 +450,7 @@ impl Database {
                 Ok(Coffee {
                     label: row.get(0)?,
                     added: row.get(1)?,
+                    archived: row.get(12)?,
                     data: CoffeeData {
                         name: row.get(2)?,
                         roast_date: row.get(3)?,
@@ -430,6 +466,17 @@ impl Database {
                 })
             })?
             .collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn set_archived(&mut self, label: Label, archived: bool) -> Result<()> {
+        let changed = self.connection.execute(
+            "UPDATE Coffee SET archived=?2 WHERE label=?1",
+            params![label, archived],
+        )?;
+        if changed == 0 {
+            bail!("coffee '{label}' does not exist");
+        }
+        Ok(())
     }
 
     pub fn list_flavours(&self) -> Result<Vec<String>> {
@@ -560,7 +607,7 @@ impl Database {
         Ok(Brew { id, coffee, data })
     }
 
-    pub fn map_brews<F>(&self, coffee: Option<Label>, mut callback: F) -> Result<()>
+    pub fn map_brews<F>(&self, coffee: Option<Label>, limit: i64, mut callback: F) -> Result<()>
     where
         F: FnMut(Brew),
     {
@@ -569,8 +616,8 @@ impl Database {
         {
             bail!("coffee '{coffee}' does not exist");
         }
-        let mut statement = self.connection.prepare("SELECT id,coffee,device,method,occurred,temperature_c,coffee_grams,grinder,grind_setting,notes,metadata FROM Brews WHERE ?1 IS NULL OR coffee=?1 ORDER BY occurred DESC, id DESC")?;
-        let brews = statement.query_map(params![coffee], |row| {
+        let mut statement = self.connection.prepare("SELECT id,coffee,device,method,occurred,temperature_c,coffee_grams,grinder,grind_setting,notes,metadata FROM Brews WHERE ?1 IS NULL OR coffee=?1 ORDER BY occurred DESC, id DESC LIMIT ?2")?;
+        let brews = statement.query_map(params![coffee, limit], |row| {
             let method_raw: String = row.get(3)?;
             let method: BrewMethod = method_raw
                 .parse()
