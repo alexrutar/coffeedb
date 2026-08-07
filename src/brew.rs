@@ -1,9 +1,9 @@
 use std::{fmt, str::FromStr};
 
 use anyhow::{Result, bail};
-use chrono::{DateTime, FixedOffset, Local};
+use chrono::{DateTime, Local, Utc};
 use clap::ValueEnum;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 
 use crate::label::Label;
 
@@ -20,17 +20,46 @@ impl DeviceLabel {
 impl FromStr for DeviceLabel {
     type Err = anyhow::Error;
     fn from_str(value: &str) -> Result<Self> {
-        let valid = !value.is_empty()
-            && value.split('-').all(|part| {
-                !part.is_empty()
-                    && part
-                        .bytes()
-                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
-            });
-        if !valid {
+        if !valid_equipment_label(value) {
             bail!("device label must match [a-z0-9]+(?:-[a-z0-9]+)*");
         }
         Ok(Self(value.into()))
+    }
+}
+
+fn valid_equipment_label(value: &str) -> bool {
+    !value.is_empty()
+        && value.split('-').all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct GrinderLabel(String);
+
+impl GrinderLabel {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromStr for GrinderLabel {
+    type Err = anyhow::Error;
+    fn from_str(value: &str) -> Result<Self> {
+        if !valid_equipment_label(value) {
+            bail!("grinder label must match [a-z0-9]+(?:-[a-z0-9]+)*");
+        }
+        Ok(Self(value.into()))
+    }
+}
+
+impl fmt::Display for GrinderLabel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
     }
 }
 
@@ -176,10 +205,10 @@ fn positive(name: &str, value: f64) -> Result<()> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct BrewData {
     pub device: DeviceLabel,
-    pub occurred: DateTime<FixedOffset>,
+    pub occurred: DateTime<Utc>,
     pub temperature_c: f64,
     pub coffee_grams: f64,
-    pub grinder: String,
+    pub grinder: GrinderLabel,
     pub grind_setting: String,
     pub notes: Option<String>,
     pub metadata: BrewMetadata,
@@ -189,10 +218,11 @@ pub struct BrewData {
 #[serde(deny_unknown_fields)]
 struct Common<T> {
     device: DeviceLabel,
-    occurred: DateTime<FixedOffset>,
+    #[serde(with = "toml_datetime")]
+    occurred: DateTime<Utc>,
     temperature_c: f64,
     coffee_grams: f64,
-    grinder: String,
+    grinder: GrinderLabel,
     grind_setting: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     notes: Option<String>,
@@ -232,13 +262,8 @@ impl BrewData {
             bail!("'temperature_c' must be finite and in (0, 100]");
         }
         positive("coffee_grams", self.coffee_grams)?;
-        for (name, value) in [
-            ("grinder", self.grinder.as_str()),
-            ("grind_setting", self.grind_setting.as_str()),
-        ] {
-            if value.is_empty() {
-                bail!("'{name}' must not be empty");
-            }
+        if self.grind_setting.is_empty() {
+            bail!("'grind_setting' must not be empty");
         }
         if self.notes.as_deref() == Some("") {
             bail!("'notes' is empty; delete it when unused");
@@ -247,14 +272,14 @@ impl BrewData {
         Ok(self)
     }
     pub fn draft(device: &DeviceLabel, method: BrewMethod) -> String {
-        let occurred = Local::now().fixed_offset().to_rfc3339();
+        let occurred = Local::now().to_rfc3339();
         let metadata = match method {
             BrewMethod::Pourover => "pours = [[0, 0]]\n",
             BrewMethod::Immersion => "volume_ml = 0\nimmersion_seconds = 0\ndrawdown_seconds = 0\n",
             BrewMethod::Espresso => "beverage_grams = 0\nduration_seconds = 0\n",
         };
         format!(
-            "# Fill in all required fields. Delete notes if unused.\ndevice = \"{device}\"\noccurred = \"{occurred}\"\ntemperature_c = 0\ncoffee_grams = 0\ngrinder = \"\"\ngrind_setting = \"\"\nnotes = \"\"\n{metadata}"
+            "# Fill in all required fields. Delete notes if unused.\ndevice = \"{device}\"\noccurred = {occurred}\ntemperature_c = 0\ncoffee_grams = 0\ngrinder = \"\"\ngrind_setting = \"\"\nnotes = \"\"\n{metadata}"
         )
     }
     pub fn to_toml(&self) -> Result<String> {
@@ -280,6 +305,32 @@ impl BrewData {
     }
 }
 
+mod toml_datetime {
+    use std::str::FromStr;
+
+    use chrono::{DateTime, Utc};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
+
+    pub fn serialize<S>(value: &DateTime<Utc>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        toml::value::Datetime::from_str(&value.to_rfc3339())
+            .map_err(serde::ser::Error::custom)?
+            .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<DateTime<Utc>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = toml::value::Datetime::deserialize(deserializer)?;
+        DateTime::parse_from_rfc3339(&value.to_string())
+            .map(|value| value.to_utc())
+            .map_err(D::Error::custom)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Brew {
     pub id: i64,
@@ -289,14 +340,116 @@ pub struct Brew {
 
 impl Brew {
     pub fn to_toml(&self) -> Result<String> {
-        let mut table: toml::Table = toml::from_str(&self.data.to_toml()?)?;
-        table.insert("id".into(), self.id.into());
-        table.insert("coffee".into(), self.coffee.to_string().into());
-        table.insert(
-            "method".into(),
-            self.data.metadata.method().to_string().into(),
-        );
-        Ok(toml::to_string_pretty(&table)?)
+        Ok(toml::to_string_pretty(self)?)
+    }
+}
+
+#[derive(Serialize)]
+struct BrewOutput<'a, T> {
+    id: i64,
+    #[serde(serialize_with = "serialize_display")]
+    coffee: Label,
+    device: &'a DeviceLabel,
+    method: BrewMethod,
+    #[serde(with = "toml_datetime")]
+    occurred: &'a DateTime<Utc>,
+    temperature_c: f64,
+    coffee_grams: f64,
+    grinder: &'a GrinderLabel,
+    grind_setting: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    notes: &'a Option<String>,
+    #[serde(flatten)]
+    metadata: &'a T,
+}
+
+fn serialize_display<T, S>(value: &T, serializer: S) -> Result<S::Ok, S::Error>
+where
+    T: fmt::Display,
+    S: Serializer,
+{
+    serializer.collect_str(value)
+}
+
+impl Serialize for Brew {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        macro_rules! serialize {
+            ($metadata:expr) => {
+                BrewOutput {
+                    id: self.id,
+                    coffee: self.coffee,
+                    device: &self.data.device,
+                    method: self.data.metadata.method(),
+                    occurred: &self.data.occurred,
+                    temperature_c: self.data.temperature_c,
+                    coffee_grams: self.data.coffee_grams,
+                    grinder: &self.data.grinder,
+                    grind_setting: &self.data.grind_setting,
+                    notes: &self.data.notes,
+                    metadata: $metadata,
+                }
+                .serialize(serializer)
+            };
+        }
+        match &self.data.metadata {
+            BrewMetadata::Pourover(value) => serialize!(value),
+            BrewMetadata::Immersion(value) => serialize!(value),
+            BrewMetadata::Espresso(value) => serialize!(value),
+        }
+    }
+}
+
+pub struct JsonBrew<'a>(pub &'a Brew);
+
+#[derive(Serialize)]
+struct JsonBrewOutput<'a, T> {
+    id: i64,
+    #[serde(serialize_with = "serialize_display")]
+    coffee: Label,
+    device: &'a DeviceLabel,
+    method: BrewMethod,
+    occurred: &'a DateTime<Utc>,
+    temperature_c: f64,
+    coffee_grams: f64,
+    grinder: &'a GrinderLabel,
+    grind_setting: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    notes: &'a Option<String>,
+    #[serde(flatten)]
+    metadata: &'a T,
+}
+
+impl Serialize for JsonBrew<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        macro_rules! serialize {
+            ($metadata:expr) => {
+                JsonBrewOutput {
+                    id: self.0.id,
+                    coffee: self.0.coffee,
+                    device: &self.0.data.device,
+                    method: self.0.data.metadata.method(),
+                    occurred: &self.0.data.occurred,
+                    temperature_c: self.0.data.temperature_c,
+                    coffee_grams: self.0.data.coffee_grams,
+                    grinder: &self.0.data.grinder,
+                    grind_setting: &self.0.data.grind_setting,
+                    notes: &self.0.data.notes,
+                    metadata: $metadata,
+                }
+                .serialize(serializer)
+            };
+        }
+        match &self.0.data.metadata {
+            BrewMetadata::Pourover(value) => serialize!(value),
+            BrewMetadata::Immersion(value) => serialize!(value),
+            BrewMetadata::Espresso(value) => serialize!(value),
+        }
     }
 }
 
@@ -307,6 +460,12 @@ pub struct BrewDevice {
     pub method: BrewMethod,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Grinder {
+    pub label: GrinderLabel,
+    pub name: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,13 +474,21 @@ mod tests {
         for good in ["aeropress", "flair-58", "origami-m", "1"] {
             assert!(good.parse::<DeviceLabel>().is_ok());
         }
+        for good in ["ode", "commandante-c40"] {
+            assert!(good.parse::<GrinderLabel>().is_ok());
+        }
         for bad in ["", "AeroPress", "-v60", "v60-", "v_60", "two--words"] {
             assert!(bad.parse::<DeviceLabel>().is_err(), "{bad}");
         }
     }
     #[test]
     fn parses_and_derives() {
-        let d = BrewData::parse_for_method("device='v60'\noccurred='2026-01-01T12:00:00+01:00'\ntemperature_c=95\ncoffee_grams=15\ngrinder='K'\ngrind_setting='5'\npours=[[0,40],[30,60]]", BrewMethod::Pourover).unwrap();
+        let d = BrewData::parse_for_method("device='v60'\noccurred=2026-01-01T12:00:00+01:00\ntemperature_c=95\ncoffee_grams=15\ngrinder='ode'\ngrind_setting='5'\npours=[[0,40],[30,60]]", BrewMethod::Pourover).unwrap();
+        assert!(
+            d.to_toml()
+                .unwrap()
+                .contains("occurred = 2026-01-01T11:00:00+00:00")
+        );
         assert_eq!(d.metadata.total_volume_ml(), Some(100.0));
         assert!(
             BrewMetadata::from_json(BrewMethod::Pourover, &d.metadata.to_json().unwrap()).unwrap()

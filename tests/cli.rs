@@ -9,7 +9,13 @@ fn cancelled_add_exits_with_error() -> Result<()> {
     let database = directory.path().join("coffeedb.db");
 
     Command::cargo_bin("coffeedb")?
-        .args(["--database", database.to_str().unwrap(), "add", "filter"])
+        .args([
+            "--database",
+            database.to_str().unwrap(),
+            "bean",
+            "add",
+            "filter",
+        ])
         .env("EDITOR", "true")
         .assert()
         .failure()
@@ -29,7 +35,13 @@ fn invalid_add_aborted_by_user_exits_with_error() -> Result<()> {
     std::fs::write(&invalid_record, "this is not valid TOML")?;
 
     Command::cargo_bin("coffeedb")?
-        .args(["--database", database.to_str().unwrap(), "add", "omni"])
+        .args([
+            "--database",
+            database.to_str().unwrap(),
+            "bean",
+            "add",
+            "omni",
+        ])
         .env("EDITOR", format!("cp {}", invalid_record.display()))
         .write_stdin("n\n")
         .assert()
@@ -59,7 +71,13 @@ flavours = ["Apple", "apple"]
     )?;
 
     Command::cargo_bin("coffeedb")?
-        .args(["--database", database.to_str().unwrap(), "add", "filter"])
+        .args([
+            "--database",
+            database.to_str().unwrap(),
+            "bean",
+            "add",
+            "filter",
+        ])
         .env("EDITOR", format!("cp {}", record.display()))
         .write_stdin("n\n")
         .assert()
@@ -89,14 +107,26 @@ flavours = []
     )?;
 
     Command::cargo_bin("coffeedb")?
-        .args(["--database", database.to_str().unwrap(), "add", "filter"])
+        .args([
+            "--database",
+            database.to_str().unwrap(),
+            "bean",
+            "add",
+            "filter",
+        ])
         .env("EDITOR", format!("cp {}", record.display()))
         .write_stdin("\n")
         .assert()
         .success();
 
     Command::cargo_bin("coffeedb")?
-        .args(["--database", database.to_str().unwrap(), "edit", "F1"])
+        .args([
+            "--database",
+            database.to_str().unwrap(),
+            "bean",
+            "edit",
+            "F1",
+        ])
         .env("EDITOR", "true")
         .assert()
         .failure()
@@ -122,7 +152,13 @@ flavours = ["Lemon", "Apple"]
     )?;
 
     Command::cargo_bin("coffeedb")?
-        .args(["--database", database.to_str().unwrap(), "add", "filter"])
+        .args([
+            "--database",
+            database.to_str().unwrap(),
+            "bean",
+            "add",
+            "filter",
+        ])
         .env("EDITOR", format!("cp {}", record.display()))
         .write_stdin("\n")
         .assert()
@@ -132,6 +168,7 @@ flavours = ["Lemon", "Apple"]
         .args([
             "--database",
             database.to_str().unwrap(),
+            "bean",
             "list",
             "--flavours",
         ])
@@ -144,6 +181,7 @@ flavours = ["Lemon", "Apple"]
         .args([
             "--database",
             database.to_str().unwrap(),
+            "bean",
             "list",
             "--template",
             "{%flavours}",
@@ -166,6 +204,7 @@ fn flavours_conflicts_with_explicit_template() -> Result<()> {
         .args([
             "--database",
             database.to_str().unwrap(),
+            "bean",
             "list",
             "--flavours",
             "--template",
@@ -199,7 +238,13 @@ flavours = []
     )?;
 
     Command::cargo_bin("coffeedb")?
-        .args(["--database", database.to_str().unwrap(), "add", "filter"])
+        .args([
+            "--database",
+            database.to_str().unwrap(),
+            "bean",
+            "add",
+            "filter",
+        ])
         .env("EDITOR", format!("cp {}", record.display()))
         .write_stdin("not a url\nhttps://example.com\n")
         .assert()
@@ -240,7 +285,13 @@ flavours = []
     )?;
 
     Command::cargo_bin("coffeedb")?
-        .args(["--database", database.to_str().unwrap(), "add", "filter"])
+        .args([
+            "--database",
+            database.to_str().unwrap(),
+            "bean",
+            "add",
+            "filter",
+        ])
         .env("EDITOR", format!("cp {}", record.display()))
         .write_stdin("\n")
         .assert()
@@ -252,6 +303,7 @@ flavours = []
             "coffeedb",
             "--database",
             database.to_str().unwrap(),
+            "bean",
             "edit",
             "F",
         ])
@@ -284,14 +336,20 @@ flavours = ["Peach", "Jasmine"]
     )?;
 
     Command::cargo_bin("coffeedb")?
-        .args(["--database", database.to_str().unwrap(), "add", "filter"])
+        .args([
+            "--database",
+            database.to_str().unwrap(),
+            "bean",
+            "add",
+            "filter",
+        ])
         .env("EDITOR", format!("cp {}", record.display()))
         .write_stdin("\n")
         .assert()
         .success();
 
     Command::cargo_bin("coffeedb")?
-        .args(["--database", database.to_str().unwrap(), "get", "F1"])
+        .args(["--database", database.to_str().unwrap(), "bean", "get", "F1"])
         .assert()
         .success()
         .stdout("Test Coffee #F1\npeach, jasmine\n\na washed process bourbon\nproduced by Test Producer\nroasted by Test Roaster\n\nEthiopia  1800 masl\n")
@@ -301,6 +359,7 @@ flavours = ["Peach", "Jasmine"]
         .args([
             "--database",
             database.to_str().unwrap(),
+            "bean",
             "get",
             "F1",
             "-fsvg",
@@ -320,6 +379,7 @@ flavours = ["Peach", "Jasmine"]
         .args([
             "--database",
             database.to_str().unwrap(),
+            "bean",
             "get",
             "F1",
             "-ftoml",
@@ -337,6 +397,7 @@ flavours = ["Peach", "Jasmine"]
         .args([
             "--database",
             database.to_str().unwrap(),
+            "bean",
             "get",
             "F1",
             "-fjson",
@@ -370,7 +431,13 @@ flavours = []
     )?;
 
     Command::cargo_bin("coffeedb")?
-        .args(["--database", database.to_str().unwrap(), "add", "filter"])
+        .args([
+            "--database",
+            database.to_str().unwrap(),
+            "bean",
+            "add",
+            "filter",
+        ])
         .env("EDITOR", format!("cp {}", record.display()))
         .write_stdin("\n")
         .assert()
@@ -380,6 +447,7 @@ flavours = []
         .args([
             "--database",
             database.to_str().unwrap(),
+            "bean",
             "get",
             "F1",
             "--format",
@@ -419,7 +487,13 @@ flavours = []
     std::fs::write(&output, "existing contents")?;
 
     Command::cargo_bin("coffeedb")?
-        .args(["--database", database.to_str().unwrap(), "add", "filter"])
+        .args([
+            "--database",
+            database.to_str().unwrap(),
+            "bean",
+            "add",
+            "filter",
+        ])
         .env("EDITOR", format!("cp {}", record.display()))
         .write_stdin("\n")
         .assert()
@@ -429,6 +503,7 @@ flavours = []
         .args([
             "--database",
             database.to_str().unwrap(),
+            "bean",
             "get",
             "F1",
             "-fsvg",
@@ -453,7 +528,13 @@ fn printing_unknown_coffee_exits_with_error() -> Result<()> {
     let database = directory.path().join("coffeedb.db");
 
     Command::cargo_bin("coffeedb")?
-        .args(["--database", database.to_str().unwrap(), "get", "F1"])
+        .args([
+            "--database",
+            database.to_str().unwrap(),
+            "bean",
+            "get",
+            "F1",
+        ])
         .assert()
         .failure()
         .code(1)

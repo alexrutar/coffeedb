@@ -9,7 +9,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use url::Url;
 
 use crate::{
-    brew::{Brew, BrewData, BrewDevice, BrewMethod, DeviceLabel},
+    brew::{Brew, BrewData, BrewDevice, BrewMethod, DeviceLabel, Grinder, GrinderLabel},
     label::{CoffeeType, Label},
     record::{Coffee, CoffeeData},
 };
@@ -60,7 +60,8 @@ CREATE INDEX Coffee_label_order_idx ON Coffee(
 const LATEST_VERSION: i32 = 1;
 const BREW_SCHEMA: &str = r#"
 CREATE TABLE Grinders (
-  name TEXT NOT NULL PRIMARY KEY CHECK(length(name) > 0)
+  label TEXT NOT NULL PRIMARY KEY CHECK(label GLOB '[a-z0-9]*' AND label NOT GLOB '*[^a-z0-9-]*' AND label NOT LIKE '-%' AND label NOT LIKE '%-' AND label NOT LIKE '%--%'),
+  name TEXT NOT NULL CHECK(length(name) > 0)
 ) STRICT;
 CREATE TABLE BrewDevices (
   label TEXT NOT NULL PRIMARY KEY CHECK(label GLOB '[a-z0-9]*' AND label NOT GLOB '*[^a-z0-9-]*' AND label NOT LIKE '-%' AND label NOT LIKE '%-' AND label NOT LIKE '%--%'),
@@ -71,12 +72,9 @@ CREATE TABLE Brews (
   id INTEGER PRIMARY KEY,
   coffee TEXT NOT NULL REFERENCES Coffee(label),
   device TEXT NOT NULL REFERENCES BrewDevices(label),
-  grinder TEXT NOT NULL REFERENCES Grinders(name),
+  grinder TEXT NOT NULL REFERENCES Grinders(label),
   method TEXT NOT NULL CHECK(method IN ('pourover', 'immersion', 'espresso')),
-  occurred TEXT NOT NULL CHECK(
-    julianday(occurred) IS NOT NULL AND
-    (substr(occurred, -1) = 'Z' OR substr(occurred, -6, 1) IN ('+', '-'))
-  ),
+  occurred TEXT NOT NULL CHECK(substr(occurred, -1) = 'Z' OR substr(occurred, -6) = '+00:00'),
   temperature_c REAL NOT NULL CHECK(temperature_c > 0 AND temperature_c <= 100),
   coffee_grams REAL NOT NULL CHECK(coffee_grams > 0 AND coffee_grams < 1.0e308),
   grind_setting TEXT NOT NULL CHECK(length(grind_setting) > 0),
@@ -89,7 +87,7 @@ CREATE TRIGGER Brews_device_method_update BEFORE UPDATE OF device, method ON Bre
 BEGIN SELECT CASE WHEN (SELECT method FROM BrewDevices WHERE label=NEW.device) IS NOT NEW.method THEN RAISE(ABORT, 'brew method does not match device') END; END;
 CREATE TRIGGER BrewDevices_method_immutable BEFORE UPDATE OF method ON BrewDevices
 WHEN OLD.method IS NOT NEW.method BEGIN SELECT RAISE(ABORT, 'device method is immutable'); END;
-CREATE INDEX Brews_coffee_occurred_idx ON Brews(coffee, julianday(occurred) DESC, id DESC);
+CREATE INDEX Brews_coffee_occurred_idx ON Brews(coffee, occurred DESC, id DESC);
 CREATE INDEX Brews_device_idx ON Brews(device);
 CREATE INDEX Brews_grinder_idx ON Brews(grinder);
 "#;
@@ -487,12 +485,20 @@ impl Database {
             .collect::<rusqlite::Result<_>>()?)
     }
 
-    pub fn grinder_exists(&self, name: &str) -> Result<bool> {
+    pub fn grinder(&self, label: &GrinderLabel) -> Result<Option<Grinder>> {
         Ok(self
             .connection
-            .query_row("SELECT 1 FROM Grinders WHERE name=?1", [name], |_| Ok(()))
-            .optional()?
-            .is_some())
+            .query_row(
+                "SELECT name FROM Grinders WHERE label=?1",
+                [label.as_str()],
+                |row| {
+                    Ok(Grinder {
+                        label: label.clone(),
+                        name: row.get(0)?,
+                    })
+                },
+            )
+            .optional()?)
     }
 
     pub fn add_brew(
@@ -500,7 +506,7 @@ impl Database {
         coffee: Label,
         data: BrewData,
         new_device: Option<&BrewDevice>,
-        register_grinder: bool,
+        new_grinder: Option<&Grinder>,
     ) -> Result<Brew> {
         let data = data.validate()?;
         let tx = self
@@ -538,57 +544,67 @@ impl Database {
         if method != data.metadata.method() {
             bail!("brew metadata does not match device method '{method}'");
         }
-        if register_grinder {
+        if let Some(grinder) = new_grinder {
+            if grinder.name.is_empty() {
+                bail!("grinder name must not be empty");
+            }
             tx.execute(
-                "INSERT OR IGNORE INTO Grinders(name) VALUES(?1)",
-                [&data.grinder],
+                "INSERT INTO Grinders(label,name) VALUES(?1,?2)",
+                params![grinder.label.as_str(), grinder.name],
             )?;
         }
         let metadata = data.metadata.to_json()?;
-        tx.execute("INSERT INTO Brews(coffee,device,grinder,method,occurred,temperature_c,coffee_grams,grind_setting,notes,metadata) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)", params![coffee, data.device.as_str(), data.grinder, method.to_string(), data.occurred.to_rfc3339(), data.temperature_c, data.coffee_grams, data.grind_setting, data.notes, metadata])?;
+        tx.execute("INSERT INTO Brews(coffee,device,grinder,method,occurred,temperature_c,coffee_grams,grind_setting,notes,metadata) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)", params![coffee, data.device.as_str(), data.grinder.as_str(), method.to_string(), data.occurred, data.temperature_c, data.coffee_grams, data.grind_setting, data.notes, metadata])?;
         let id = tx.last_insert_rowid();
         tx.commit()?;
         Ok(Brew { id, coffee, data })
     }
 
-    pub fn list_brews(&self, coffee: Label) -> Result<Vec<Brew>> {
-        if self.get(coffee)?.is_none() {
+    pub fn map_brews<F>(&self, coffee: Option<Label>, mut callback: F) -> Result<()>
+    where
+        F: FnMut(Brew),
+    {
+        if let Some(coffee) = coffee
+            && self.get(coffee)?.is_none()
+        {
             bail!("coffee '{coffee}' does not exist");
         }
-        let mut statement = self.connection.prepare("SELECT id,device,method,occurred,temperature_c,coffee_grams,grinder,grind_setting,notes,metadata FROM Brews WHERE coffee=?1 ORDER BY julianday(occurred) DESC, id DESC")?;
-        Ok(statement
-            .query_map([coffee], |row| {
-                let method_raw: String = row.get(2)?;
-                let method: BrewMethod = method_raw
-                    .parse()
-                    .map_err(|e: anyhow::Error| sql_conversion(2, e))?;
-                let metadata_raw: String = row.get(9)?;
-                let metadata = crate::brew::BrewMetadata::from_json(method, &metadata_raw)
-                    .map_err(|e| sql_conversion(9, e))?;
-                let occurred_raw: String = row.get(3)?;
-                let occurred = DateTime::parse_from_rfc3339(&occurred_raw).map_err(|e| {
-                    rusqlite::Error::FromSqlConversionFailure(3, Type::Text, Box::new(e))
-                })?;
-                let device_raw: String = row.get(1)?;
-                let device = device_raw
-                    .parse()
-                    .map_err(|e: anyhow::Error| sql_conversion(1, e))?;
-                Ok(Brew {
-                    id: row.get(0)?,
-                    coffee,
-                    data: BrewData {
-                        device,
-                        occurred,
-                        temperature_c: row.get(4)?,
-                        coffee_grams: row.get(5)?,
-                        grinder: row.get(6)?,
-                        grind_setting: row.get(7)?,
-                        notes: row.get(8)?,
-                        metadata,
-                    },
-                })
-            })?
-            .collect::<rusqlite::Result<_>>()?)
+        let mut statement = self.connection.prepare("SELECT id,coffee,device,method,occurred,temperature_c,coffee_grams,grinder,grind_setting,notes,metadata FROM Brews WHERE ?1 IS NULL OR coffee=?1 ORDER BY occurred DESC, id DESC")?;
+        let brews = statement.query_map(params![coffee], |row| {
+            let method_raw: String = row.get(3)?;
+            let method: BrewMethod = method_raw
+                .parse()
+                .map_err(|e: anyhow::Error| sql_conversion(3, e))?;
+            let metadata_raw: String = row.get(10)?;
+            let metadata = crate::brew::BrewMetadata::from_json(method, &metadata_raw)
+                .map_err(|e| sql_conversion(10, e))?;
+            let occurred = row.get(4)?;
+            let device_raw: String = row.get(2)?;
+            let device = device_raw
+                .parse()
+                .map_err(|e: anyhow::Error| sql_conversion(2, e))?;
+            Ok(Brew {
+                id: row.get(0)?,
+                coffee: row.get(1)?,
+                data: BrewData {
+                    device,
+                    occurred,
+                    temperature_c: row.get(5)?,
+                    coffee_grams: row.get(6)?,
+                    grinder: row
+                        .get::<_, String>(7)?
+                        .parse()
+                        .map_err(|e: anyhow::Error| sql_conversion(7, e))?,
+                    grind_setting: row.get(8)?,
+                    notes: row.get(9)?,
+                    metadata,
+                },
+            })
+        })?;
+        for brew in brews {
+            callback(brew?);
+        }
+        Ok(())
     }
 }
 

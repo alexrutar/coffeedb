@@ -1,5 +1,6 @@
 use std::{
     ffi::OsStr,
+    fmt::Write as FmtWrite,
     fs::{OpenOptions, create_dir_all},
     io::{self, Write},
     path::PathBuf,
@@ -11,10 +12,14 @@ use clap::builder::StyledStr;
 use clap::{Parser, Subcommand, ValueEnum};
 use clap_complete::engine::{ArgValueCompleter, CompletionCandidate};
 use etcetera::{AppStrategy, AppStrategyArgs, choose_app_strategy};
+use serde::{
+    Serialize, Serializer,
+    ser::{SerializeSeq, SerializeStruct},
+};
 use url::Url;
 
 use crate::{
-    brew::{BrewData, BrewDevice, BrewMethod, DeviceLabel},
+    brew::{BrewData, BrewDevice, BrewMethod, DeviceLabel, Grinder},
     db::Database,
     edit::{Builder, edit_with_builder},
     label::{CoffeeType, Label},
@@ -42,6 +47,20 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Add, inspect, edit, and list coffee beans.
+    Bean {
+        #[command(subcommand)]
+        command: BeanCommand,
+    },
+    /// Add and list coffee brews.
+    Brew {
+        #[command(subcommand)]
+        command: BrewCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum BeanCommand {
     /// Add a new coffee.
     Add {
         /// Label category for the new coffee.
@@ -75,11 +94,6 @@ enum Command {
         #[arg(long, value_name = "PATH")]
         out: Option<PathBuf>,
     },
-    /// Add and list coffee brews.
-    Brew {
-        #[command(subcommand)]
-        command: BrewCommand,
-    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -91,10 +105,13 @@ enum BrewCommand {
         #[arg(add = ArgValueCompleter::new(complete_devices))]
         device: DeviceLabel,
     },
-    /// List brews for a coffee, newest first.
+    /// List brews newest first, optionally restricted to one coffee.
     List {
         #[arg(add = ArgValueCompleter::new(complete_labels))]
-        label: Label,
+        label: Option<Label>,
+        /// Output format.
+        #[arg(short, long, value_enum, default_value_t)]
+        format: BrewListFormat,
     },
 }
 
@@ -108,13 +125,15 @@ impl Cli {
         let mut database = Database::open(&path)?;
 
         match self.command {
-            Command::Add { kind } => add(&mut database, kind),
-            Command::Edit { label } => edit(&mut database, label),
-            Command::List { template, flavours } => list(&database, &template, flavours),
-            Command::Get { label, format, out } => get(&database, label, format, out),
+            Command::Bean { command } => match command {
+                BeanCommand::Add { kind } => add(&mut database, kind),
+                BeanCommand::Edit { label } => edit(&mut database, label),
+                BeanCommand::List { template, flavours } => list(&database, &template, flavours),
+                BeanCommand::Get { label, format, out } => get(&database, label, format, out),
+            },
             Command::Brew { command } => match command {
                 BrewCommand::Add { label, device } => add_brew(&mut database, label, device),
-                BrewCommand::List { label } => list_brews(&database, label),
+                BrewCommand::List { label, format } => list_brews(&database, label, format),
             },
         }
     }
@@ -174,7 +193,7 @@ fn add_brew(database: &mut Database, coffee: Label, requested: DeviceLabel) -> R
                     "Register device '{}' as '{}' ({})?",
                     device.label, device.name, device.method
                 ),
-                false,
+                true,
             )? {
                 bail!("device registration cancelled");
             }
@@ -188,14 +207,44 @@ fn add_brew(database: &mut Database, coffee: Label, requested: DeviceLabel) -> R
         else {
             bail!("no brew was added");
         };
-        if !database.grinder_exists(&data.grinder)?
-            && !confirm(&format!("Register grinder '{}'?", data.grinder), false)?
-        {
-            source = data.to_toml()?;
+        let new_grinder = if database.grinder(&data.grinder)?.is_none() {
+            eprintln!("Grinder '{}' is not registered.", data.grinder);
+            loop {
+                let value = prompt("Descriptive name (or 'edit' to edit the brew again)")?;
+                if matches!(value.as_str(), "e" | "edit") {
+                    source = data.to_toml()?;
+                    break None;
+                }
+                if !value.is_empty() {
+                    let grinder = Grinder {
+                        label: data.grinder.clone(),
+                        name: value,
+                    };
+                    if confirm(
+                        &format!(
+                            "Register grinder '{}' as '{}'?",
+                            grinder.label, grinder.name
+                        ),
+                        true,
+                    )? {
+                        break Some(grinder);
+                    }
+                    source = data.to_toml()?;
+                    break None;
+                }
+                eprintln!("Grinder name must not be empty.");
+            }
+        } else {
+            Some(Grinder {
+                label: data.grinder.clone(),
+                name: String::new(),
+            })
+        };
+        let Some(grinder_choice) = new_grinder else {
             continue;
-        }
-        let register_grinder = !database.grinder_exists(&data.grinder)?;
-        let brew = database.add_brew(coffee, data, resolved_pending, register_grinder)?;
+        };
+        let registration = (!grinder_choice.name.is_empty()).then_some(&grinder_choice);
+        let brew = database.add_brew(coffee, data, resolved_pending, registration)?;
         print!("{}", brew.to_toml()?);
         return Ok(());
     }
@@ -245,14 +294,202 @@ fn edit_brew_record<'a>(
     }
 }
 
-fn list_brews(database: &Database, coffee: Label) -> Result<()> {
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+enum BrewListFormat {
+    #[default]
+    Text,
+    Toml,
+    Json,
+}
+
+fn list_brews(database: &Database, coffee: Option<Label>, format: BrewListFormat) -> Result<()> {
     let stdout = io::stdout();
     let mut output = stdout.lock();
-    for brew in database.list_brews(coffee)? {
-        writeln!(output, "[[brews]]")?;
-        writeln!(output, "{}", brew.to_toml()?.trim_end())?;
+    let log = BrewLog { database, coffee };
+    match format {
+        BrewListFormat::Text => {
+            let mut first = true;
+            let mut render_error = None;
+            database.map_brews(coffee, |brew| {
+                if render_error.is_some() {
+                    return;
+                }
+                let rendered = render_brew_text(database, &brew).and_then(|rendered| {
+                    if !first {
+                        writeln!(output)?;
+                    }
+                    first = false;
+                    write!(output, "{rendered}")?;
+                    Ok(())
+                });
+                if let Err(error) = rendered {
+                    render_error = Some(error);
+                }
+            })?;
+            if let Some(error) = render_error {
+                return Err(error);
+            }
+        }
+        BrewListFormat::Toml => {
+            let mut buffer = toml::ser::Buffer::new();
+            log.serialize(toml::Serializer::pretty(&mut buffer))?;
+            write!(output, "{buffer}")?;
+        }
+        BrewListFormat::Json => {
+            serde_json::to_writer_pretty(&mut output, &JsonBrewLog(&log))?;
+            writeln!(output)?;
+        }
     }
     Ok(())
+}
+
+fn render_brew_text(database: &Database, brew: &crate::brew::Brew) -> Result<String> {
+    use crate::brew::BrewMetadata;
+
+    let device = database
+        .device(&brew.data.device)?
+        .ok_or_else(|| anyhow::anyhow!("device '{}' does not exist", brew.data.device))?;
+    let grinder = database
+        .grinder(&brew.data.grinder)?
+        .ok_or_else(|| anyhow::anyhow!("grinder '{}' does not exist", brew.data.grinder))?;
+    let method = match brew.data.metadata.method() {
+        BrewMethod::Pourover => "Pourover",
+        BrewMethod::Immersion => "Immersion",
+        BrewMethod::Espresso => "Espresso",
+    };
+    let mut output = String::new();
+    writeln!(output, "> {}", brew.data.occurred.format("%B %-d, %Y"))?;
+    writeln!(
+        output,
+        "= {method} brew for #{} (brew id {})",
+        brew.coffee, brew.id
+    )?;
+    writeln!(
+        output,
+        "· {:.1}g in a {} @ {:.0}°C",
+        brew.data.coffee_grams, device.name, brew.data.temperature_c
+    )?;
+    writeln!(output, "· {} @ {}", grinder.name, brew.data.grind_setting)?;
+    match &brew.data.metadata {
+        BrewMetadata::Espresso(metadata) => writeln!(
+            output,
+            "· {:.1}g out (ratio {:.1}) in {:.0}s",
+            metadata.beverage_grams,
+            metadata.beverage_grams / brew.data.coffee_grams,
+            metadata.duration_seconds
+        )?,
+        BrewMetadata::Immersion(metadata) => writeln!(
+            output,
+            "· {:.0}s brew, {:.0}s drawdown",
+            metadata.immersion_seconds, metadata.drawdown_seconds
+        )?,
+        BrewMetadata::Pourover(metadata) => {
+            write!(
+                output,
+                "· {} {}: ",
+                metadata.pours.len(),
+                if metadata.pours.len() == 1 {
+                    "Pour"
+                } else {
+                    "Pours"
+                }
+            )?;
+            for (index, &(elapsed, volume)) in metadata.pours.iter().enumerate() {
+                if index != 0 {
+                    output.push_str(", ");
+                }
+                write!(output, "{volume:.0}ml @ {elapsed:.0}s")?;
+            }
+            output.push('\n');
+        }
+    }
+    if let Some(notes) = &brew.data.notes {
+        for line in notes.trim().lines() {
+            writeln!(output, "| {}", line.trim())?;
+        }
+    }
+    Ok(output)
+}
+
+struct BrewLog<'a> {
+    database: &'a Database,
+    coffee: Option<Label>,
+}
+
+struct BrewSequence<'a>(&'a BrewLog<'a>);
+struct JsonBrewLog<'a>(&'a BrewLog<'a>);
+
+impl Serialize for BrewLog<'_> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("BrewLog", 1)?;
+        state.serialize_field("brews", &BrewSequence(self))?;
+        state.end()
+    }
+}
+
+impl Serialize for BrewSequence<'_> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut sequence = serializer.serialize_seq(None)?;
+        let mut serialization_error = None;
+        self.0
+            .database
+            .map_brews(self.0.coffee, |brew| {
+                if serialization_error.is_none()
+                    && let Err(error) = sequence.serialize_element(&brew)
+                {
+                    serialization_error = Some(error);
+                }
+            })
+            .map_err(serde::ser::Error::custom)?;
+        if let Some(error) = serialization_error {
+            return Err(error);
+        }
+        sequence.end()
+    }
+}
+
+impl Serialize for JsonBrewLog<'_> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        use crate::brew::JsonBrew;
+
+        struct JsonSequence<'a>(&'a BrewLog<'a>);
+        impl Serialize for JsonSequence<'_> {
+            fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+            where
+                S: Serializer,
+            {
+                let mut sequence = serializer.serialize_seq(None)?;
+                let mut serialization_error = None;
+                self.0
+                    .database
+                    .map_brews(self.0.coffee, |brew| {
+                        if serialization_error.is_none()
+                            && let Err(error) = sequence.serialize_element(&JsonBrew(&brew))
+                        {
+                            serialization_error = Some(error);
+                        }
+                    })
+                    .map_err(serde::ser::Error::custom)?;
+                if let Some(error) = serialization_error {
+                    return Err(error);
+                }
+                sequence.end()
+            }
+        }
+
+        let mut state = serializer.serialize_struct("BrewLog", 1)?;
+        state.serialize_field("brews", &JsonSequence(self.0))?;
+        state.end()
+    }
 }
 
 fn default_database_path() -> Result<PathBuf> {
