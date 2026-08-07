@@ -11,6 +11,8 @@ mod types;
 pub use types::CoffeeElevation;
 use types::{BrewDeviceRow, BrewRow, CoffeeRow, Json};
 
+mod migrations;
+
 use crate::{
     brew::{Brew, BrewData, BrewDevice, BrewMethod, DeviceLabel, Grinder, GrinderLabel},
     label::{CoffeeType, Label},
@@ -35,8 +37,8 @@ CREATE TABLE Coffee (
   elevation TEXT,
   variety TEXT,
   process TEXT,
-  flavours TEXT NOT NULL CHECK (json_valid(flavours)),
-  archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0, 1))
+  flavours TEXT NOT NULL,
+  archived INTEGER NOT NULL DEFAULT 0
 ) STRICT;
 
 CREATE TABLE Flavours (
@@ -46,7 +48,7 @@ CREATE TABLE Flavours (
 CREATE TABLE Labels (
   type TEXT NOT NULL UNIQUE,
   short TEXT NOT NULL PRIMARY KEY,
-  count INTEGER NOT NULL CHECK (count >= 0)
+  count INTEGER NOT NULL
 ) STRICT;
 
 INSERT INTO Labels (type, short, count) VALUES
@@ -61,36 +63,29 @@ CREATE INDEX Coffee_label_order_idx ON Coffee(
 );
 "#;
 
-const LATEST_VERSION: i32 = 1;
 const BREW_SCHEMA: &str = r#"
 CREATE TABLE Grinders (
-  label TEXT NOT NULL PRIMARY KEY CHECK(label GLOB '[a-z0-9]*' AND label NOT GLOB '*[^a-z0-9-]*' AND label NOT LIKE '-%' AND label NOT LIKE '%-' AND label NOT LIKE '%--%'),
-  name TEXT NOT NULL CHECK(length(name) > 0)
+  label TEXT NOT NULL PRIMARY KEY,
+  name TEXT NOT NULL
 ) STRICT;
 CREATE TABLE BrewDevices (
-  label TEXT NOT NULL PRIMARY KEY CHECK(label GLOB '[a-z0-9]*' AND label NOT GLOB '*[^a-z0-9-]*' AND label NOT LIKE '-%' AND label NOT LIKE '%-' AND label NOT LIKE '%--%'),
-  name TEXT NOT NULL CHECK(length(name) > 0),
-  method TEXT NOT NULL CHECK(method IN ('pourover', 'immersion', 'espresso'))
+  label TEXT NOT NULL PRIMARY KEY,
+  name TEXT NOT NULL,
+  method TEXT NOT NULL
 ) STRICT;
 CREATE TABLE Brews (
   id INTEGER PRIMARY KEY,
   coffee TEXT NOT NULL REFERENCES Coffee(label),
   device TEXT NOT NULL REFERENCES BrewDevices(label),
   grinder TEXT NOT NULL REFERENCES Grinders(label),
-  method TEXT NOT NULL CHECK(method IN ('pourover', 'immersion', 'espresso')),
-  occurred TEXT NOT NULL CHECK(substr(occurred, -1) = 'Z' OR substr(occurred, -6) = '+00:00'),
-  temperature_c REAL NOT NULL CHECK(temperature_c > 0 AND temperature_c <= 100),
-  coffee_grams REAL NOT NULL CHECK(coffee_grams > 0 AND coffee_grams < 1.0e308),
-  grind_setting TEXT NOT NULL CHECK(length(grind_setting) > 0),
-  notes TEXT CHECK(notes IS NULL OR length(notes) > 0),
-  metadata TEXT NOT NULL CHECK(json_valid(metadata))
+  method TEXT NOT NULL,
+  occurred TEXT NOT NULL,
+  temperature_c REAL NOT NULL,
+  coffee_grams REAL NOT NULL,
+  grind_setting TEXT NOT NULL,
+  notes TEXT,
+  metadata TEXT NOT NULL
 ) STRICT;
-CREATE TRIGGER Brews_device_method_insert BEFORE INSERT ON Brews
-BEGIN SELECT CASE WHEN (SELECT method FROM BrewDevices WHERE label=NEW.device) IS NOT NEW.method THEN RAISE(ABORT, 'brew method does not match device') END; END;
-CREATE TRIGGER Brews_device_method_update BEFORE UPDATE OF device, method ON Brews
-BEGIN SELECT CASE WHEN (SELECT method FROM BrewDevices WHERE label=NEW.device) IS NOT NEW.method THEN RAISE(ABORT, 'brew method does not match device') END; END;
-CREATE TRIGGER BrewDevices_method_immutable BEFORE UPDATE OF method ON BrewDevices
-WHEN OLD.method IS NOT NEW.method BEGIN SELECT RAISE(ABORT, 'device method is immutable'); END;
 CREATE INDEX Brews_coffee_occurred_idx ON Brews(coffee, occurred DESC, id DESC);
 CREATE INDEX Brews_device_idx ON Brews(device);
 CREATE INDEX Brews_grinder_idx ON Brews(grinder);
@@ -128,9 +123,10 @@ impl Database {
             bail!("database is not coffeedb-compatible");
         }
         let version: i32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > LATEST_VERSION {
+        if version > migrations::LATEST_VERSION {
             bail!(
-                "database schema version {version} is newer than supported version {LATEST_VERSION}"
+                "database schema version {version} is newer than supported version {}",
+                migrations::LATEST_VERSION
             );
         }
         Ok(Self { connection })
@@ -159,21 +155,13 @@ impl Database {
             let version: i32 = self
                 .connection
                 .pragma_query_value(None, "user_version", |row| row.get(0))?;
-            if version > LATEST_VERSION {
+            if version > migrations::LATEST_VERSION {
                 bail!(
-                    "database schema version {version} is newer than supported version {LATEST_VERSION}"
+                    "database schema version {version} is newer than supported version {}",
+                    migrations::LATEST_VERSION
                 );
             }
-            if version == 0 {
-                let transaction = self.connection.transaction()?;
-                transaction.execute(
-                    "ALTER TABLE Coffee ADD COLUMN archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0, 1))",
-                    [],
-                )?;
-                transaction.execute_batch(BREW_SCHEMA)?;
-                transaction.pragma_update(None, "user_version", LATEST_VERSION)?;
-                transaction.commit()?;
-            }
+            migrations::migrate(&mut self.connection, version)?;
             return Ok(());
         }
 
@@ -188,7 +176,7 @@ impl Database {
             transaction.pragma_update(None, "application_id", APPLICATION_ID)?;
             transaction.execute_batch(SCHEMA)?;
             transaction.execute_batch(BREW_SCHEMA)?;
-            transaction.pragma_update(None, "user_version", LATEST_VERSION)?;
+            transaction.pragma_update(None, "user_version", migrations::LATEST_VERSION)?;
             transaction.commit()?;
             return Ok(());
         }
@@ -650,6 +638,96 @@ mod tests {
         let mut database = Database { connection };
         let error = database.initialize().unwrap_err();
         assert!(error.to_string().contains("application_id is not set"));
+        Ok(())
+    }
+
+    #[test]
+    fn migrates_v0_to_check_free_latest_schema() -> Result<()> {
+        const V0_SCHEMA: &str = r#"
+CREATE TABLE Roasters (
+  name TEXT NOT NULL PRIMARY KEY,
+  url TEXT
+) STRICT;
+CREATE TABLE Coffee (
+  label TEXT NOT NULL PRIMARY KEY,
+  name TEXT NOT NULL,
+  roast_date TEXT,
+  roaster TEXT NOT NULL REFERENCES Roasters(name),
+  origin TEXT,
+  producer TEXT,
+  farm TEXT,
+  variety TEXT,
+  process TEXT,
+  elevation TEXT,
+  added TEXT NOT NULL DEFAULT '2026-08-06 12:30:00+00:00',
+  flavours TEXT NOT NULL CHECK (json_valid(flavours))
+) STRICT;
+CREATE TABLE Flavours (
+  description TEXT NOT NULL PRIMARY KEY
+) STRICT;
+CREATE TABLE Labels (
+  type TEXT NOT NULL UNIQUE,
+  short TEXT NOT NULL PRIMARY KEY,
+  count INTEGER NOT NULL CHECK (count >= 0)
+) STRICT;
+INSERT INTO Labels (type, short, count) VALUES
+  ('Espresso', 'E', 0),
+  ('Filter', 'F', 1),
+  ('Omni', 'O', 0);
+INSERT INTO Roasters(name, url) VALUES ('Legacy Roaster', NULL);
+INSERT INTO Coffee(
+  label, added, name, roast_date, roaster, origin, producer, farm, elevation,
+  variety, process, flavours
+) VALUES (
+  'F1', '2026-01-01T00:00:00+00:00', 'Legacy Coffee', NULL, 'Legacy Roaster',
+  NULL, NULL, NULL, NULL, NULL, NULL, '["apple"]'
+);
+CREATE INDEX Coffee_roaster_idx ON Coffee(roaster);
+CREATE INDEX Coffee_label_order_idx ON Coffee(
+  CASE substr(label, 1, 1) WHEN 'E' THEN 0 WHEN 'F' THEN 1 ELSE 2 END,
+  CAST(substr(label, 2) AS INTEGER)
+);
+"#;
+
+        let connection = Connection::open_in_memory()?;
+        connection.pragma_update(None, "foreign_keys", "ON")?;
+        connection.pragma_update(None, "application_id", APPLICATION_ID)?;
+        connection.execute_batch(V0_SCHEMA)?;
+        let mut database = Database { connection };
+        database.initialize()?;
+
+        let version: i32 = database
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))?;
+        assert_eq!(version, migrations::LATEST_VERSION);
+        assert_eq!(
+            database.get("F1".parse()?)?.unwrap().data.name,
+            "Legacy Coffee"
+        );
+
+        let schema: String = database.connection.query_row(
+            "SELECT group_concat(sql, ' ') FROM sqlite_master WHERE sql IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )?;
+        assert!(!schema.to_ascii_uppercase().contains("CHECK"));
+        let triggers: i64 = database.connection.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='trigger'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(triggers, 0);
+
+        database.connection.execute_batch(
+            "UPDATE Coffee SET flavours='not json', archived=7 WHERE label='F1';
+             UPDATE Labels SET count=-1 WHERE short='F';
+             INSERT INTO Grinders(label, name) VALUES ('', '');
+             INSERT INTO BrewDevices(label, name, method) VALUES ('', '', 'unknown');
+             INSERT INTO Brews(
+               coffee, device, grinder, method, occurred, temperature_c, coffee_grams,
+               grind_setting, notes, metadata
+             ) VALUES ('F1', '', '', 'other', 'not utc', -1, -1, '', '', 'not json');",
+        )?;
         Ok(())
     }
 }
