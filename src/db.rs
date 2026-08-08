@@ -367,6 +367,18 @@ impl Database {
             .optional()?)
     }
 
+    pub fn brew(&self, id: i64) -> Result<Option<Brew>> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT id,coffee,device,method,occurred,temperature_c,coffee_grams,grinder,grind_setting,notes,metadata FROM Brews WHERE id=?1",
+                [id],
+                BrewRow::from_row,
+            )
+            .optional()?
+            .map(|row| row.0))
+    }
+
     pub fn add_brew(
         &mut self,
         coffee: Label,
@@ -416,6 +428,47 @@ impl Database {
         }
         tx.execute("INSERT INTO Brews(coffee,device,grinder,method,occurred,temperature_c,coffee_grams,grind_setting,notes,metadata) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)", params![coffee, data.device, data.grinder, device, data.occurred, data.temperature_c, data.coffee_grams, data.grind_setting, data.notes, Json(&data.metadata)])?;
         let id = tx.last_insert_rowid();
+        tx.commit()?;
+        Ok(Brew { id, coffee, data })
+    }
+
+    pub fn update_brew(&mut self, id: i64, data: BrewData) -> Result<Brew> {
+        let data = data.validate()?;
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let coffee = tx
+            .query_row("SELECT coffee FROM Brews WHERE id=?1", [id], |row| {
+                row.get(0)
+            })
+            .optional()?
+            .ok_or_else(|| anyhow!("brew '{id}' does not exist"))?;
+        let method = tx
+            .query_row(
+                "SELECT method FROM BrewDevices WHERE label=?1",
+                [&data.device],
+                |row| row.get::<_, BrewMethod>(0),
+            )
+            .optional()?
+            .ok_or_else(|| anyhow!("device '{}' does not exist", data.device))?;
+        if method != data.metadata.method() {
+            bail!("brew metadata does not match device method '{method}'");
+        }
+        let grinder_exists = tx
+            .query_row(
+                "SELECT 1 FROM Grinders WHERE label=?1",
+                [&data.grinder],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !grinder_exists {
+            bail!("grinder '{}' does not exist", data.grinder);
+        }
+        tx.execute(
+            "UPDATE Brews SET device=?1,grinder=?2,method=?3,occurred=?4,temperature_c=?5,coffee_grams=?6,grind_setting=?7,notes=?8,metadata=?9 WHERE id=?10",
+            params![data.device, data.grinder, method, data.occurred, data.temperature_c, data.coffee_grams, data.grind_setting, data.notes, Json(&data.metadata), id],
+        )?;
         tx.commit()?;
         Ok(Brew { id, coffee, data })
     }
@@ -578,6 +631,43 @@ mod tests {
         let updated = database.get(coffee.label)?.unwrap();
         assert_eq!(updated.data, replacement);
         assert_eq!(updated.added, added);
+        Ok(())
+    }
+
+    #[test]
+    fn gets_and_updates_brews_without_changing_their_identity() -> Result<()> {
+        let mut database = Database::in_memory()?;
+        let coffee = database.add(CoffeeType::Filter, data("Coffee"), None)?;
+        let device = BrewDevice {
+            label: "v60".parse()?,
+            name: "V60".into(),
+            method: BrewMethod::Pourover,
+        };
+        let grinder = Grinder {
+            label: "grinder".parse()?,
+            name: "Grinder".into(),
+        };
+        let original = BrewData::parse_for_method(
+            r#"device = "v60"
+occurred = 2026-08-08T08:00:00Z
+temperature_c = 95
+coffee_grams = 15
+grinder = "grinder"
+grind_setting = "20"
+pours = [[0, 50], [30, 200]]
+"#,
+            BrewMethod::Pourover,
+        )?;
+        let brew = database.add_brew(coffee.label, original, Some(&device), Some(&grinder))?;
+
+        let mut replacement = brew.data.clone();
+        replacement.temperature_c = 90.0;
+        replacement.notes = Some("Sweeter".into());
+        let updated = database.update_brew(brew.id, replacement.clone())?;
+
+        assert_eq!(updated.id, brew.id);
+        assert_eq!(updated.coffee, coffee.label);
+        assert_eq!(database.brew(brew.id)?.unwrap().data, replacement);
         Ok(())
     }
 

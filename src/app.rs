@@ -117,6 +117,11 @@ enum BrewCommand {
         #[arg(add = ArgValueCompleter::new(complete_devices))]
         device: DeviceLabel,
     },
+    /// Edit an existing brew.
+    Edit {
+        /// Numeric brew ID, as shown by `brew list`.
+        id: i64,
+    },
     /// List brews newest first, optionally restricted to one coffee.
     List {
         #[arg(add = ArgValueCompleter::new(complete_labels))]
@@ -155,6 +160,7 @@ impl Cli {
             },
             Command::Brew { command } => match command {
                 BrewCommand::Add { label, device } => add_brew(&mut database, label, device),
+                BrewCommand::Edit { id } => edit_brew(&mut database, id),
                 BrewCommand::List {
                     label,
                     format,
@@ -226,7 +232,7 @@ fn add_brew(database: &mut Database, coffee: Label, requested: DeviceLabel) -> R
     let mut source = BrewData::draft(&requested, initial_method);
     'editing: loop {
         let Some((data, resolved_pending)) =
-            edit_brew_record(database, &source, initial_method, pending.as_ref())?
+            edit_brew_record(database, &source, initial_method, pending.as_ref(), None)?
         else {
             bail!("no brew was added");
         };
@@ -266,11 +272,28 @@ fn add_brew(database: &mut Database, coffee: Label, requested: DeviceLabel) -> R
     }
 }
 
+fn edit_brew(database: &mut Database, id: i64) -> Result<()> {
+    let Some(current) = database.brew(id)? else {
+        bail!("brew '{id}' does not exist");
+    };
+    let source = current.data.to_toml()?;
+    let initial_method = current.data.metadata.method();
+    let Some((data, _)) =
+        edit_brew_record(database, &source, initial_method, None, Some(&current.data))?
+    else {
+        bail!("no data was changed");
+    };
+    let brew = database.update_brew(id, data)?;
+    print!("{}", brew.to_toml()?);
+    Ok(())
+}
+
 fn edit_brew_record<'a>(
     database: &Database,
     source: &str,
     initial_method: BrewMethod,
     pending: Option<&'a BrewDevice>,
+    original: Option<&BrewData>,
 ) -> Result<Option<(BrewData, Option<&'a BrewDevice>)>> {
     let mut builder = Builder::new();
     builder.suffix(".toml");
@@ -297,9 +320,15 @@ fn edit_brew_record<'a>(
             };
             let data = BrewData::parse_for_method(&user_text, method)
                 .with_context(|| format!("metadata does not match device method '{method}'"))?;
+            if original.is_some() && database.grinder(&data.grinder)?.is_none() {
+                bail!("replacement grinder '{}' is not registered", data.grinder);
+            }
             Ok((data, registration))
         })();
         match attempt {
+            Ok(value) if original == Some(&value.0) => {
+                eprintln!("Text edited but contents unchanged.");
+            }
             Ok(value) => return Ok(Some(value)),
             Err(error) => eprintln!("Contents invalid: {error:#}"),
         }
