@@ -682,23 +682,31 @@ fn get(
     let Some(coffee) = database.get(label)? else {
         bail!("coffee '{label}' does not exist");
     };
-    let rendered = match format {
-        OutputFormat::Text => render_text(&coffee),
-        OutputFormat::Svg => render_svg(&coffee),
-        OutputFormat::Toml => render_toml(&coffee)?,
-        OutputFormat::Json => render_json(&coffee)?,
-    };
     if let Some(path) = out {
         let mut output = OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&path)
             .with_context(|| format!("failed to create output file '{}'", path.display()))?;
-        write!(output, "{rendered}")
+        render_output(&mut output, &coffee, format)
             .with_context(|| format!("failed to write output file '{}'", path.display()))?;
     } else {
         let stdout = io::stdout();
-        write!(stdout.lock(), "{rendered}")?;
+        render_output(stdout.lock(), &coffee, format)?;
+    }
+    Ok(())
+}
+
+fn render_output<W: io::Write>(
+    mut writer: W,
+    coffee: &crate::record::Coffee,
+    format: OutputFormat,
+) -> Result<()> {
+    match format {
+        OutputFormat::Text => render_text(writer, coffee)?,
+        OutputFormat::Svg => render_svg(writer, coffee)?,
+        OutputFormat::Toml => write!(writer, "{}", render_toml(coffee)?)?,
+        OutputFormat::Json => render_json(writer, coffee)?,
     }
     Ok(())
 }

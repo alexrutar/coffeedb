@@ -1,5 +1,6 @@
-use std::fmt::{self, Write as _};
+use std::io::{self, Write};
 
+use anyhow::Result;
 use serde::Serialize;
 
 use crate::record::Coffee;
@@ -30,19 +31,19 @@ pub fn render_toml(coffee: &Coffee) -> Result<String, toml::ser::Error> {
     toml::to_string_pretty(&SerializableCoffee::from(coffee))
 }
 
-pub fn render_json(coffee: &Coffee) -> Result<String, serde_json::Error> {
-    let mut output = serde_json::to_string_pretty(&SerializableCoffee::from(coffee))?;
-    output.push('\n');
-    Ok(output)
+pub fn render_json<W: Write>(mut writer: W, coffee: &Coffee) -> Result<()> {
+    serde_json::to_writer_pretty(&mut writer, &SerializableCoffee::from(coffee))?;
+    writeln!(writer)?;
+    Ok(())
 }
 
-pub fn render_text(coffee: &Coffee) -> String {
-    let mut output = format!("{} #{}\n", coffee.data.name, coffee.label);
+pub fn render_text<W: Write>(mut writer: W, coffee: &Coffee) -> io::Result<()> {
+    writeln!(writer, "{} #{}", coffee.data.name, coffee.label)?;
 
     if !coffee.data.flavours.is_empty() {
-        writeln!(output, "{}", coffee.data.flavours.join(", ")).unwrap();
+        writeln!(writer, "{}", coffee.data.flavours.join(", "))?;
     }
-    output.push('\n');
+    writeln!(writer)?;
 
     if let Some(first_value) = coffee
         .data
@@ -50,40 +51,38 @@ pub fn render_text(coffee: &Coffee) -> String {
         .as_deref()
         .or(coffee.data.variety.as_deref())
     {
-        write!(output, "{} ", indefinite_article(first_value)).unwrap();
+        write!(writer, "{} ", indefinite_article(first_value))?;
         if let Some(process) = coffee.data.process.as_deref() {
-            write!(output, "{} process", process.to_lowercase()).unwrap();
+            write!(writer, "{} process", process.to_lowercase())?;
         }
         if let Some(variety) = coffee.data.variety.as_deref() {
             if coffee.data.process.is_some() {
-                output.push(' ');
+                write!(writer, " ")?;
             }
-            output.push_str(&variety.to_lowercase());
+            write!(writer, "{}", variety.to_lowercase())?;
         }
-        output.push('\n');
+        writeln!(writer)?;
     }
 
     match (coffee.data.producer.as_deref(), coffee.data.farm.as_deref()) {
-        (Some(producer), Some(farm)) => {
-            writeln!(output, "produced by {producer} @ {farm}").unwrap()
-        }
-        (Some(producer), None) => writeln!(output, "produced by {producer}").unwrap(),
-        (None, Some(farm)) => writeln!(output, "produced at {farm}").unwrap(),
+        (Some(producer), Some(farm)) => writeln!(writer, "produced by {producer} @ {farm}")?,
+        (Some(producer), None) => writeln!(writer, "produced by {producer}")?,
+        (None, Some(farm)) => writeln!(writer, "produced at {farm}")?,
         (None, None) => {}
     }
-    writeln!(output, "roasted by {}", coffee.data.roaster).unwrap();
+    writeln!(writer, "roasted by {}", coffee.data.roaster)?;
 
     match (coffee.data.origin.as_deref(), coffee.data.elevation) {
-        (Some(origin), Some(elevation)) => writeln!(output, "\n{origin}  {elevation}").unwrap(),
-        (Some(origin), None) => writeln!(output, "\n{origin}").unwrap(),
-        (None, Some(elevation)) => writeln!(output, "\n{elevation}").unwrap(),
+        (Some(origin), Some(elevation)) => writeln!(writer, "\n{origin}  {elevation}")?,
+        (Some(origin), None) => writeln!(writer, "\n{origin}")?,
+        (None, Some(elevation)) => writeln!(writer, "\n{elevation}")?,
         (None, None) => {}
     }
 
-    output
+    Ok(())
 }
 
-pub fn render_svg(coffee: &Coffee) -> String {
+pub fn render_svg<W: Write>(mut writer: W, coffee: &Coffee) -> io::Result<()> {
     let width = estimated_svg_width(coffee);
     let right_x = width - HORIZONTAL_PADDING;
     let has_production = coffee.data.producer.is_some() || coffee.data.farm.is_some();
@@ -100,38 +99,35 @@ pub fn render_svg(coffee: &Coffee) -> String {
     let footer_end = if has_location { footer_y } else { content_end };
     let height = footer_end + if has_location { 16 } else { 24 };
 
-    let mut output = String::new();
     writeln!(
-        output,
+        writer,
         r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img" aria-label="coffee label">"#
-    )
-    .unwrap();
+    )?;
     writeln!(
-        output,
+        writer,
         r##"  <rect width="{width}" height="{height}" rx="16" fill="#faf9f6"/>"##
-    )
-    .unwrap();
-    output.push_str(
+    )?;
+    writer.write_all(
         "  <g fill=\"#1c1b19\" font-family=\"Palatino, 'Palatino Linotype', 'Book Antiqua', serif\">\n\
-         \x20   <text x=\"30\" y=\"48\" font-size=\"27\" font-weight=\"600\" font-variant=\"small-caps\" letter-spacing=\"-0.5\">",
-    );
-    write_xml(&mut output, &coffee.data.name).unwrap();
+         \x20   <text x=\"30\" y=\"48\" font-size=\"27\" font-weight=\"600\" font-variant=\"small-caps\" letter-spacing=\"-0.5\">"
+            .as_bytes(),
+    )?;
+    write_xml(&mut writer, &coffee.data.name)?;
     writeln!(
-        output,
+        writer,
         "<tspan font-weight=\"400\" fill=\"#aaa59c\" letter-spacing=\"1.2\"> #{}</tspan></text>",
         coffee.label
-    )
-    .unwrap();
+    )?;
 
     if has_notes {
-        output.push_str("    <text x=\"30\" y=\"72\" font-size=\"15\" font-style=\"italic\" fill=\"#5f5c56\" style=\"text-transform:lowercase\">");
+        writer.write_all(b"    <text x=\"30\" y=\"72\" font-size=\"15\" font-style=\"italic\" fill=\"#5f5c56\" style=\"text-transform:lowercase\">")?;
         for (index, flavour) in coffee.data.flavours.iter().enumerate() {
             if index > 0 {
-                output.push_str(", ");
+                writer.write_all(b", ")?;
             }
-            write_xml(&mut output, flavour).unwrap();
+            write_xml(&mut writer, flavour)?;
         }
-        output.push_str("</text>\n");
+        writer.write_all(b"</text>\n")?;
     }
 
     if let Some(first_value) = coffee
@@ -141,93 +137,87 @@ pub fn render_svg(coffee: &Coffee) -> String {
         .or(coffee.data.variety.as_deref())
     {
         write!(
-            output,
+            writer,
             "    <text x=\"30\" y=\"{processing_y}\" font-size=\"14\" font-style=\"italic\">{} ",
             indefinite_article(first_value)
-        )
-        .unwrap();
+        )?;
         if let Some(process) = coffee.data.process.as_deref() {
-            output.push_str("<tspan font-weight=\"700\">");
-            write_xml_lowercase(&mut output, process).unwrap();
-            output.push_str("</tspan> process");
+            writer.write_all(b"<tspan font-weight=\"700\">")?;
+            write_xml_lowercase(&mut writer, process)?;
+            writer.write_all(b"</tspan> process")?;
         }
         if let Some(variety) = coffee.data.variety.as_deref() {
             if coffee.data.process.is_some() {
-                output.push(' ');
+                writer.write_all(b" ")?;
             }
-            output.push_str("<tspan font-weight=\"700\">");
-            write_xml_lowercase(&mut output, variety).unwrap();
-            output.push_str("</tspan>");
+            writer.write_all(b"<tspan font-weight=\"700\">")?;
+            write_xml_lowercase(&mut writer, variety)?;
+            writer.write_all(b"</tspan>")?;
         }
-        output.push_str("</text>\n");
+        writer.write_all(b"</text>\n")?;
     }
 
     match (coffee.data.producer.as_deref(), coffee.data.farm.as_deref()) {
         (None, None) => {}
         production => {
             write!(
-                output,
+                writer,
                 "    <text x=\"30\" y=\"{production_y}\" font-size=\"14\" font-style=\"italic\">produced "
-            )
-            .unwrap();
+            )?;
             match production {
                 (Some(producer), Some(farm)) => {
-                    output.push_str("by <tspan font-weight=\"700\">");
-                    write_xml(&mut output, producer).unwrap();
-                    output.push_str("</tspan> @ <tspan font-weight=\"700\">");
-                    write_xml(&mut output, farm).unwrap();
-                    output.push_str("</tspan>");
+                    writer.write_all(b"by <tspan font-weight=\"700\">")?;
+                    write_xml(&mut writer, producer)?;
+                    writer.write_all(b"</tspan> @ <tspan font-weight=\"700\">")?;
+                    write_xml(&mut writer, farm)?;
+                    writer.write_all(b"</tspan>")?;
                 }
                 (Some(producer), None) => {
-                    output.push_str("by <tspan font-weight=\"700\">");
-                    write_xml(&mut output, producer).unwrap();
-                    output.push_str("</tspan>");
+                    writer.write_all(b"by <tspan font-weight=\"700\">")?;
+                    write_xml(&mut writer, producer)?;
+                    writer.write_all(b"</tspan>")?;
                 }
                 (None, Some(farm)) => {
-                    output.push_str("at <tspan font-weight=\"700\">");
-                    write_xml(&mut output, farm).unwrap();
-                    output.push_str("</tspan>");
+                    writer.write_all(b"at <tspan font-weight=\"700\">")?;
+                    write_xml(&mut writer, farm)?;
+                    writer.write_all(b"</tspan>")?;
                 }
                 (None, None) => {}
             }
-            output.push_str("</text>\n");
+            writer.write_all(b"</text>\n")?;
         }
     }
 
     write!(
-        output,
+        writer,
         "    <text x=\"30\" y=\"{roasted_y}\" font-size=\"14\" font-style=\"italic\">roasted by <tspan font-weight=\"700\">"
-    )
-    .unwrap();
-    write_xml(&mut output, &coffee.data.roaster).unwrap();
-    output.push_str("</tspan></text>\n");
+    )?;
+    write_xml(&mut writer, &coffee.data.roaster)?;
+    writer.write_all(b"</tspan></text>\n")?;
 
     if has_location {
         writeln!(
-            output,
+            writer,
             "    <line x1=\"30\" y1=\"{bottom_divider_y}\" x2=\"{right_x}\" y2=\"{bottom_divider_y}\" stroke=\"#d8d5ce\" stroke-width=\"1\" />"
-        )
-        .unwrap();
+        )?;
     }
 
     if let Some(origin) = coffee.data.origin.as_deref() {
         write!(
-            output,
+            writer,
             "    <text x=\"30\" y=\"{footer_y}\" font-size=\"14\">"
-        )
-        .unwrap();
-        write_xml(&mut output, origin).unwrap();
-        output.push_str("</text>\n");
+        )?;
+        write_xml(&mut writer, origin)?;
+        writer.write_all(b"</text>\n")?;
     }
     if let Some(elevation) = coffee.data.elevation {
         writeln!(
-            output,
+            writer,
             "    <text x=\"{right_x}\" y=\"{footer_y}\" text-anchor=\"end\" font-size=\"14\">{elevation}</text>"
-        )
-        .unwrap();
+        )?;
     }
-    output.push_str("  </g>\n</svg>\n");
-    output
+    writer.write_all(b"  </g>\n</svg>\n")?;
+    Ok(())
 }
 
 fn estimated_svg_width(coffee: &Coffee) -> usize {
@@ -337,23 +327,26 @@ fn indefinite_article(value: &str) -> &'static str {
     }
 }
 
-fn write_xml_lowercase(output: &mut String, value: &str) -> fmt::Result {
-    write_xml(output, &value.to_lowercase())
+fn write_xml_lowercase<W: Write>(writer: W, value: &str) -> io::Result<()> {
+    write_xml(writer, &value.to_lowercase())
 }
 
-fn write_xml(output: &mut String, value: &str) -> fmt::Result {
+fn write_xml<W: Write>(mut writer: W, value: &str) -> io::Result<()> {
     for character in value.chars() {
-        output.write_str(match character {
-            '&' => "&amp;",
-            '<' => "&lt;",
-            '>' => "&gt;",
-            '"' => "&quot;",
-            '\'' => "&apos;",
-            _ => {
-                output.write_char(character)?;
-                continue;
+        writer.write_all(
+            match character {
+                '&' => "&amp;",
+                '<' => "&lt;",
+                '>' => "&gt;",
+                '"' => "&quot;",
+                '\'' => "&apos;",
+                _ => {
+                    write!(writer, "{character}")?;
+                    continue;
+                }
             }
-        })?;
+            .as_bytes(),
+        )?;
     }
     Ok(())
 }
@@ -370,6 +363,12 @@ mod tests {
         label::{CoffeeType, Label},
         record::CoffeeData,
     };
+
+    fn rendered_svg(coffee: &Coffee) -> String {
+        let mut output = Vec::new();
+        render_svg(&mut output, coffee).unwrap();
+        String::from_utf8(output).unwrap()
+    }
 
     fn coffee() -> Coffee {
         Coffee {
@@ -394,23 +393,23 @@ mod tests {
     #[test]
     fn height_tracks_visible_optional_rows() {
         let mut coffee = coffee();
-        assert!(render_svg(&coffee).contains(r#"height="104""#));
+        assert!(rendered_svg(&coffee).contains(r#"height="104""#));
 
         coffee.data.origin = Some("Ethiopia".into());
         coffee.data.process = Some("washed".into());
-        assert!(render_svg(&coffee).contains(r#"height="154""#));
+        assert!(rendered_svg(&coffee).contains(r#"height="154""#));
 
         coffee.data.flavours.push("peach".into());
-        assert!(render_svg(&coffee).contains(r#"height="178""#));
+        assert!(rendered_svg(&coffee).contains(r#"height="178""#));
     }
 
     #[test]
     fn omits_empty_tasting_notes() {
         let mut coffee = coffee();
-        assert!(!render_svg(&coffee).contains(r#"x="30" y="72" font-size="15""#));
+        assert!(!rendered_svg(&coffee).contains(r#"x="30" y="72" font-size="15""#));
 
         coffee.data.flavours.push("peach".into());
-        let svg = render_svg(&coffee);
+        let svg = rendered_svg(&coffee);
         assert!(svg.contains(r#"x="30" y="72" font-size="15""#));
         assert!(svg.contains(">peach</text>"));
         assert!(!svg.contains(">notes"));
@@ -420,11 +419,11 @@ mod tests {
     fn formats_production_byline() {
         let mut coffee = coffee();
         coffee.data.producer = Some("Producer & Sons".into());
-        let svg = render_svg(&coffee);
+        let svg = rendered_svg(&coffee);
         assert!(svg.contains("produced by <tspan font-weight=\"700\">Producer &amp; Sons</tspan>"));
 
         coffee.data.farm = Some("The Farm".into());
-        let svg = render_svg(&coffee);
+        let svg = rendered_svg(&coffee);
         assert!(
             svg.contains(
                 "Producer &amp; Sons</tspan> @ <tspan font-weight=\"700\">The Farm</tspan>"
@@ -432,7 +431,7 @@ mod tests {
         );
 
         coffee.data.producer = None;
-        let svg = render_svg(&coffee);
+        let svg = rendered_svg(&coffee);
         assert!(svg.contains("produced at <tspan font-weight=\"700\">The Farm</tspan>"));
     }
 
@@ -441,7 +440,7 @@ mod tests {
         let mut coffee = coffee();
         coffee.data.origin = Some("Ethiopia".into());
         coffee.data.producer = Some("Producer".into());
-        let svg = render_svg(&coffee);
+        let svg = rendered_svg(&coffee);
         let roasted = svg.find("roasted by").unwrap();
         let produced = svg.find("produced by").unwrap();
         let origin = svg.find(">Ethiopia</text>").unwrap();
@@ -454,7 +453,7 @@ mod tests {
     fn formats_variety_and_process_as_a_sentence() {
         let mut coffee = coffee();
         coffee.data.variety = Some("Bourbon".into());
-        let svg = render_svg(&coffee);
+        let svg = rendered_svg(&coffee);
         assert!(
             svg.contains(
                 "font-style=\"italic\">a <tspan font-weight=\"700\">bourbon</tspan></text>"
@@ -463,19 +462,19 @@ mod tests {
         assert!(!svg.contains(" process"));
 
         coffee.data.process = Some("Washed".into());
-        let svg = render_svg(&coffee);
+        let svg = rendered_svg(&coffee);
         assert!(svg.contains(
             "font-style=\"italic\">a <tspan font-weight=\"700\">washed</tspan> process <tspan font-weight=\"700\">bourbon</tspan>"
         ));
 
         coffee.data.variety = None;
-        let svg = render_svg(&coffee);
+        let svg = rendered_svg(&coffee);
         assert!(svg.contains(
             "font-style=\"italic\">a <tspan font-weight=\"700\">washed</tspan> process</text>"
         ));
 
         coffee.data.process = Some("Anaerobic".into());
-        assert!(render_svg(&coffee).contains(
+        assert!(rendered_svg(&coffee).contains(
             "font-style=\"italic\">an <tspan font-weight=\"700\">anaerobic</tspan> process</text>"
         ));
     }
@@ -485,7 +484,7 @@ mod tests {
         let mut coffee = coffee();
         coffee.data.flavours = vec!["peach".into()];
         coffee.data.process = Some("Washed".into());
-        let svg = render_svg(&coffee);
+        let svg = rendered_svg(&coffee);
         let notes = svg.find(">peach</text>").unwrap();
         let processing = svg.find(">washed</tspan> process").unwrap();
         let roasted = svg.find("roasted by").unwrap();
@@ -499,7 +498,7 @@ mod tests {
         coffee.data.flavours = vec!["peach".into()];
         coffee.data.process = Some("Washed".into());
         coffee.data.producer = Some("Producer".into());
-        let svg = render_svg(&coffee);
+        let svg = rendered_svg(&coffee);
         assert!(svg.contains(r#"y="104" font-size="14" font-style="italic">a"#));
         assert!(svg.contains(r#"y="126" font-size="14" font-style="italic">produced"#));
         assert!(svg.contains(r#"y="148" font-size="14" font-style="italic">roasted"#));
@@ -510,7 +509,7 @@ mod tests {
         let mut coffee = coffee();
         coffee.data.origin = Some("Ethiopia".into());
         coffee.data.elevation = Some(CoffeeElevation::Range(1000, 1200));
-        let svg = render_svg(&coffee);
+        let svg = rendered_svg(&coffee);
         let width = estimated_svg_width(&coffee);
         let right_x = width - HORIZONTAL_PADDING;
         assert!(width < 500);
@@ -529,7 +528,7 @@ mod tests {
         long.data.name = "An Exceptionally Long Coffee Name".into();
         assert!(estimated_svg_width(&short) < estimated_svg_width(&long));
 
-        let svg = render_svg(&short);
+        let svg = rendered_svg(&short);
         let width = estimated_svg_width(&short);
         assert!(svg.contains(&format!(r#"width="{width}""#)));
         assert!(width < 500);
@@ -539,6 +538,6 @@ mod tests {
     fn escapes_xml_text() {
         let mut coffee = coffee();
         coffee.data.name = "A & B <Coffee>".into();
-        assert!(render_svg(&coffee).contains("A &amp; B &lt;Coffee&gt;"));
+        assert!(rendered_svg(&coffee).contains("A &amp; B &lt;Coffee&gt;"));
     }
 }
