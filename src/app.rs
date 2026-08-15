@@ -33,14 +33,8 @@ pub struct Cli {
     #[command(subcommand)]
     command: Command,
 
-    /// Use a specific SQLite database file.
-    #[arg(
-        short = 'D',
-        long,
-        env = "COFFEEDB_DATABASE_PATH",
-        global = true,
-        value_name = "PATH"
-    )]
+    /// Use a specific coffeedb database file.
+    #[arg(short = 'D', long, env = "COFFEEDB_DATABASE_PATH", value_name = "PATH")]
     database: Option<PathBuf>,
 }
 
@@ -62,13 +56,13 @@ enum Command {
 enum BeanCommand {
     /// Add a new coffee.
     Add {
-        /// Label category for the new coffee.
+        /// The type of coffee.
         #[arg(value_enum)]
         kind: CoffeeType,
     },
     /// Edit an existing coffee.
     Edit {
-        /// Coffee label, such as F3.
+        /// Coffee label.
         #[arg(add = ArgValueCompleter::new(complete_labels))]
         label: Label,
     },
@@ -86,7 +80,7 @@ enum BeanCommand {
     },
     /// Get a human-readable description of an existing coffee.
     Get {
-        /// Coffee label, such as F3.
+        /// Coffee label.
         #[arg(add = ArgValueCompleter::new(complete_labels))]
         label: Label,
         /// Output format.
@@ -96,9 +90,9 @@ enum BeanCommand {
         #[arg(long, value_name = "PATH")]
         out: Option<PathBuf>,
     },
-    /// Archive or unarchive a coffee.
+    /// Archive a coffee.
     Archive {
-        /// Coffee label, such as F3.
+        /// Coffee label.
         #[arg(add = ArgValueCompleter::new(complete_labels))]
         label: Label,
         /// Restore the coffee to active status.
@@ -118,10 +112,10 @@ enum BrewCommand {
     },
     /// Edit an existing brew.
     Edit {
-        /// Numeric brew ID, as shown by `brew list`.
+        /// Brew number as shown by `brew list`.
         id: i64,
     },
-    /// List brews newest first, optionally restricted to one coffee.
+    /// List brews.
     List {
         #[arg(add = ArgValueCompleter::new(complete_labels))]
         label: Option<Label>,
@@ -129,8 +123,8 @@ enum BrewCommand {
         #[arg(short, long, value_enum, default_value_t)]
         format: BrewListFormat,
         /// Show only the N most recent brews.
-        #[arg(long, value_name = "N", value_parser = clap::value_parser!(i64).range(0..))]
-        limit: Option<i64>,
+        #[arg(long, value_name = "N")]
+        limit: Option<u32>,
     },
 }
 
@@ -164,7 +158,7 @@ impl Cli {
                     label,
                     format,
                     limit,
-                } => list_brews(&database, label, format, limit.unwrap_or(-1)),
+                } => list_brews(&database, label, format, limit.map(i64::from).unwrap_or(-1)),
             },
         }
     }
