@@ -1,6 +1,5 @@
 use std::{
     ffi::OsStr,
-    fmt::Write as FmtWrite,
     fs::{OpenOptions, create_dir_all},
     io::{self, Write},
     path::PathBuf,
@@ -20,7 +19,7 @@ use url::Url;
 
 use crate::{
     brew::{BrewData, BrewDevice, BrewMethod, DeviceLabel, Grinder},
-    db::Database,
+    db::{Database, MapBrewsError},
     edit::{Builder, edit_with_builder},
     label::{CoffeeType, Label},
     print::{render_json, render_svg, render_text, render_toml},
@@ -363,26 +362,17 @@ fn list_brews(
     match format {
         BrewListFormat::Text => {
             let mut first = true;
-            let mut render_error = None;
-            database.map_brews(coffee, limit, |brew| {
-                if render_error.is_some() {
-                    return;
-                }
-                let rendered = render_brew_text(database, &brew).and_then(|rendered| {
+            database
+                .map_brews(coffee, limit, |brew| {
                     if !first {
                         writeln!(output)?;
                     }
                     first = false;
-                    write!(output, "{rendered}")?;
-                    Ok(())
-                });
-                if let Err(error) = rendered {
-                    render_error = Some(error);
-                }
-            })?;
-            if let Some(error) = render_error {
-                return Err(error);
-            }
+                    render_brew_text(&mut output, database, &brew)
+                })
+                .map_err(|error| match error {
+                    MapBrewsError::Callback(error) | MapBrewsError::Other(error) => error,
+                })?;
         }
         BrewListFormat::Toml => {
             let mut buffer = toml::ser::Buffer::new();
@@ -397,7 +387,11 @@ fn list_brews(
     Ok(())
 }
 
-fn render_brew_text(database: &Database, brew: &crate::brew::Brew) -> Result<String> {
+fn render_brew_text<W: io::Write>(
+    mut writer: W,
+    database: &Database,
+    brew: &crate::brew::Brew,
+) -> Result<()> {
     use crate::brew::BrewMetadata;
 
     let device = database
@@ -411,35 +405,34 @@ fn render_brew_text(database: &Database, brew: &crate::brew::Brew) -> Result<Str
         BrewMethod::Immersion => "Immersion",
         BrewMethod::Espresso => "Espresso",
     };
-    let mut output = String::new();
-    writeln!(output, "> {}", brew.data.occurred.format("%B %-d, %Y"))?;
+    writeln!(writer, "> {}", brew.data.occurred.format("%B %-d, %Y"))?;
     writeln!(
-        output,
-        "= {method} brew for #{} (brew id {})",
+        writer,
+        "= {method} brew for #{} (brew {})",
         brew.coffee, brew.id
     )?;
     writeln!(
-        output,
+        writer,
         "· {:.1}g in a {} @ {:.0}°C",
         brew.data.coffee_grams, device.name, brew.data.temperature_c
     )?;
-    writeln!(output, "· {} @ {}", grinder.name, brew.data.grind_setting)?;
+    writeln!(writer, "· {} @ {}", grinder.name, brew.data.grind_setting)?;
     match &brew.data.metadata {
         BrewMetadata::Espresso(metadata) => writeln!(
-            output,
+            writer,
             "· {:.1}g out (ratio {:.1}) in {:.0}s",
             metadata.beverage_grams,
             metadata.beverage_grams / brew.data.coffee_grams,
             metadata.duration_seconds
         )?,
         BrewMetadata::Immersion(metadata) => writeln!(
-            output,
+            writer,
             "· {:.0}s brew, {:.0}s drawdown",
             metadata.immersion_seconds, metadata.drawdown_seconds
         )?,
         BrewMetadata::Pourover(metadata) => {
             write!(
-                output,
+                writer,
                 "· {} {}: ",
                 metadata.pours.len(),
                 if metadata.pours.len() == 1 {
@@ -450,19 +443,19 @@ fn render_brew_text(database: &Database, brew: &crate::brew::Brew) -> Result<Str
             )?;
             for (index, &(elapsed, volume)) in metadata.pours.iter().enumerate() {
                 if index != 0 {
-                    output.push_str(", ");
+                    write!(writer, ", ")?;
                 }
-                write!(output, "{volume:.0}ml @ {elapsed:.0}s")?;
+                write!(writer, "{volume:.0}ml @ {elapsed:.0}s")?;
             }
-            output.push('\n');
+            write!(writer, "\n")?;
         }
     }
     if let Some(notes) = &brew.data.notes {
         for line in notes.trim().lines() {
-            writeln!(output, "| {}", line.trim())?;
+            writeln!(writer, "| {}", line.trim())?;
         }
     }
-    Ok(output)
+    Ok(())
 }
 
 struct BrewLog<'a> {
@@ -491,20 +484,13 @@ impl Serialize for BrewSequence<'_> {
         S: Serializer,
     {
         let mut sequence = serializer.serialize_seq(None)?;
-        let mut serialization_error = None;
         self.0
             .database
             .map_brews(self.0.coffee, self.0.limit, |brew| {
-                if serialization_error.is_none()
-                    && let Err(error) = sequence.serialize_element(&brew)
-                {
-                    serialization_error = Some(error);
-                }
+                sequence.serialize_element(&brew)?;
+                Ok::<(), S::Error>(())
             })
             .map_err(serde::ser::Error::custom)?;
-        if let Some(error) = serialization_error {
-            return Err(error);
-        }
         sequence.end()
     }
 }
@@ -523,20 +509,13 @@ impl Serialize for JsonBrewLog<'_> {
                 S: Serializer,
             {
                 let mut sequence = serializer.serialize_seq(None)?;
-                let mut serialization_error = None;
                 self.0
                     .database
                     .map_brews(self.0.coffee, self.0.limit, |brew| {
-                        if serialization_error.is_none()
-                            && let Err(error) = sequence.serialize_element(&JsonBrew(&brew))
-                        {
-                            serialization_error = Some(error);
-                        }
+                        sequence.serialize_element(&JsonBrew(&brew))?;
+                        Ok::<(), S::Error>(())
                     })
                     .map_err(serde::ser::Error::custom)?;
-                if let Some(error) = serialization_error {
-                    return Err(error);
-                }
                 sequence.end()
             }
         }

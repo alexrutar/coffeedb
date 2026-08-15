@@ -1,4 +1,4 @@
-use std::{num::NonZero, path::Path};
+use std::{error::Error, fmt, num::NonZero, path::Path};
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Local};
@@ -96,6 +96,30 @@ const APPLICATION_ID: i32 = 0x75af_f574;
 
 pub struct Database {
     connection: Connection,
+}
+
+#[derive(Debug)]
+pub enum MapBrewsError<E> {
+    Callback(E),
+    Other(anyhow::Error),
+}
+
+impl<E: fmt::Display> fmt::Display for MapBrewsError<E> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Callback(error) => error.fmt(formatter),
+            Self::Other(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl<E: Error + 'static> Error for MapBrewsError<E> {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Callback(error) => Some(error),
+            Self::Other(error) => Some(error.as_ref()),
+        }
+    }
 }
 
 impl Database {
@@ -473,19 +497,32 @@ impl Database {
         Ok(Brew { id, coffee, data })
     }
 
-    pub fn map_brews<F>(&self, coffee: Option<Label>, limit: i64, mut callback: F) -> Result<()>
+    pub fn map_brews<F, E>(
+        &self,
+        coffee: Option<Label>,
+        limit: i64,
+        mut callback: F,
+    ) -> std::result::Result<(), MapBrewsError<E>>
     where
-        F: FnMut(Brew),
+        F: FnMut(Brew) -> std::result::Result<(), E>,
     {
         if let Some(coffee) = coffee
-            && self.get(coffee)?.is_none()
+            && self.get(coffee).map_err(MapBrewsError::Other)?.is_none()
         {
-            bail!("coffee '{coffee}' does not exist");
+            return Err(MapBrewsError::Other(anyhow!(
+                "coffee '{coffee}' does not exist"
+            )));
         }
-        let mut statement = self.connection.prepare("SELECT id,coffee,device,method,occurred,temperature_c,coffee_grams,grinder,grind_setting,notes,metadata FROM Brews WHERE ?1 IS NULL OR coffee=?1 ORDER BY occurred DESC, id DESC LIMIT ?2")?;
-        let brews = statement.query_map(params![coffee, limit], BrewRow::from_row)?;
+        let mut statement = self.connection.prepare("SELECT id,coffee,device,method,occurred,temperature_c,coffee_grams,grinder,grind_setting,notes,metadata FROM Brews WHERE ?1 IS NULL OR coffee=?1 ORDER BY occurred DESC, id DESC LIMIT ?2").map_err(anyhow::Error::from).map_err(MapBrewsError::Other)?;
+        let brews = statement
+            .query_map(params![coffee, limit], BrewRow::from_row)
+            .map_err(anyhow::Error::from)
+            .map_err(MapBrewsError::Other)?;
         for brew in brews {
-            callback(brew?.0);
+            let brew = brew
+                .map_err(anyhow::Error::from)
+                .map_err(MapBrewsError::Other)?;
+            callback(brew.0).map_err(MapBrewsError::Callback)?;
         }
         Ok(())
     }
