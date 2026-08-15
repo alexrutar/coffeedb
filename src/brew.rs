@@ -273,7 +273,7 @@ impl BrewData {
             BrewMethod::Espresso => "beverage_grams = 0\nduration_seconds = 0\n",
         };
         format!(
-            "# Fill in all required fields. Delete notes if unused.\ndevice = \"{device}\"\noccurred = {occurred}\ntemperature_c = 0\ncoffee_grams = 0\ngrinder = \"\"\ngrind_setting = \"\"\nnotes = \"\"\n{metadata}"
+            "# Fill in all required fields. Delete notes if unused.\ndevice = \"{device}\"\noccurred = {occurred}\ntemperature_c = 0\ncoffee_grams = 0\ngrinder = \"\"\ngrind_setting = \"\"\n{metadata}notes = \"\"\"\\\n\"\"\"\n"
         )
     }
     pub fn to_toml(&self) -> Result<String> {
