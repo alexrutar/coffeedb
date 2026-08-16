@@ -332,12 +332,6 @@ pub struct Brew {
     pub data: BrewData,
 }
 
-impl Brew {
-    pub fn to_toml(&self) -> Result<String> {
-        toml::to_string_pretty(self).map_err(Into::into)
-    }
-}
-
 #[derive(Serialize)]
 struct BrewOutput<'a, T> {
     id: i64,

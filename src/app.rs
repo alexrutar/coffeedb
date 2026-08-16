@@ -113,6 +113,7 @@ enum BrewCommand {
     /// Edit an existing brew.
     Edit {
         /// Brew number as shown by `brew list`.
+        #[arg(add = ArgValueCompleter::new(complete_brews))]
         id: i64,
     },
     /// List brews.
@@ -184,6 +185,38 @@ fn complete_devices(current: &OsStr) -> Vec<CompletionCandidate> {
                 .help(Some(StyledStr::from(format!("{} ({})", d.name, d.method))))
         })
         .collect()
+}
+
+fn complete_brews(current: &OsStr) -> Vec<CompletionCandidate> {
+    let Some(current) = current.to_str() else {
+        return Vec::new();
+    };
+    let Some(path) = completion_database_path() else {
+        return Vec::new();
+    };
+    let Ok(database) = Database::open_read_only(&path) else {
+        return Vec::new();
+    };
+    let mut candidates = Vec::new();
+    if database
+        .map_brews(None, -1, |brew| {
+            let id = brew.id.to_string();
+            if id.starts_with(current) {
+                let method = brew_method_title(brew.data.metadata.method());
+                let help = format!(
+                    "{} {method} brew for #{}",
+                    brew.data.occurred.format("%Y-%m-%d"),
+                    brew.coffee
+                );
+                candidates.push(CompletionCandidate::new(id).help(Some(StyledStr::from(help))));
+            }
+            Ok::<(), std::convert::Infallible>(())
+        })
+        .is_err()
+    {
+        return Vec::new();
+    }
+    candidates
 }
 
 fn add_brew(database: &mut Database, coffee: Label, requested: DeviceLabel) -> Result<()> {
@@ -260,7 +293,8 @@ fn add_brew(database: &mut Database, coffee: Label, requested: DeviceLabel) -> R
             None
         };
         let brew = database.add_brew(coffee, data, resolved_pending, new_grinder.as_ref())?;
-        print!("{}", brew.to_toml()?);
+        let stdout = io::stdout();
+        render_brew_text(stdout.lock(), database, &brew)?;
         return Ok(());
     }
 }
@@ -277,7 +311,8 @@ fn edit_brew(database: &mut Database, id: i64) -> Result<()> {
         bail!("no data was changed");
     };
     let brew = database.update_brew(id, data)?;
-    print!("{}", brew.to_toml()?);
+    let stdout = io::stdout();
+    render_brew_text(stdout.lock(), database, &brew)?;
     Ok(())
 }
 
@@ -394,11 +429,7 @@ fn render_brew_text<W: io::Write>(
     let grinder = database
         .grinder(&brew.data.grinder)?
         .ok_or_else(|| anyhow::anyhow!("grinder '{}' does not exist", brew.data.grinder))?;
-    let method = match brew.data.metadata.method() {
-        BrewMethod::Pourover => "Pourover",
-        BrewMethod::Immersion => "Immersion",
-        BrewMethod::Espresso => "Espresso",
-    };
+    let method = brew_method_title(brew.data.metadata.method());
     writeln!(writer, "> {}", brew.data.occurred.format("%B %-d, %Y"))?;
     writeln!(
         writer,
@@ -450,6 +481,14 @@ fn render_brew_text<W: io::Write>(
         }
     }
     Ok(())
+}
+
+fn brew_method_title(method: BrewMethod) -> &'static str {
+    match method {
+        BrewMethod::Pourover => "Pourover",
+        BrewMethod::Immersion => "Immersion",
+        BrewMethod::Espresso => "Espresso",
+    }
 }
 
 struct BrewLog<'a> {
