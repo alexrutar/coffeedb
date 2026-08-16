@@ -105,8 +105,10 @@ enum BeanCommand {
 enum BrewCommand {
     /// Add a brew using an editor.
     Add {
+        /// The bean used in the brew.
         #[arg(add = ArgValueCompleter::new(complete_labels))]
         label: Label,
+        /// The device used for brewing.
         #[arg(add = ArgValueCompleter::new(complete_devices))]
         device: DeviceLabel,
     },
