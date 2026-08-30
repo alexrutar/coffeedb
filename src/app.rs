@@ -438,11 +438,18 @@ fn render_brew_text<W: io::Write>(
         "= {method} brew for #{} (brew {})",
         brew.coffee, brew.id
     )?;
-    writeln!(
-        writer,
-        "· {:.1}g in a {} @ {:.0}°C",
-        brew.data.coffee_grams, device.name, brew.data.temperature_c
-    )?;
+    match &brew.data.metadata {
+        BrewMetadata::Immersion(metadata) => writeln!(
+            writer,
+            "· {:.1}g / {:.0}ml in a {} @ {:.0}°C",
+            brew.data.coffee_grams, metadata.volume_ml, device.name, brew.data.temperature_c
+        )?,
+        _ => writeln!(
+            writer,
+            "· {:.1}g in a {} @ {:.0}°C",
+            brew.data.coffee_grams, device.name, brew.data.temperature_c
+        )?,
+    }
     writeln!(writer, "· {} @ {}", grinder.name, brew.data.grind_setting)?;
     match &brew.data.metadata {
         BrewMetadata::Espresso(metadata) => writeln!(
