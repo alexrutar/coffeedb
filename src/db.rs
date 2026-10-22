@@ -391,6 +391,20 @@ impl Database {
             .optional()?)
     }
 
+    pub fn list_grinders(&self) -> Result<Vec<Grinder>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT label, name FROM Grinders ORDER BY label")?;
+        Ok(statement
+            .query_map([], |row| {
+                Ok(Grinder {
+                    label: row.get(0)?,
+                    name: row.get(1)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn brew(&self, id: i64) -> Result<Option<Brew>> {
         Ok(self
             .connection

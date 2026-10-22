@@ -257,10 +257,17 @@ fn add_brew(database: &mut Database, coffee: Label, requested: DeviceLabel) -> R
             (method, Some(device))
         }
     };
+    let context = brew_add_context(database, initial_method, pending.as_ref())?;
     let mut source = BrewData::draft(&requested, initial_method);
     'editing: loop {
-        let Some((data, resolved_pending)) =
-            edit_brew_record(database, &source, initial_method, pending.as_ref(), None)?
+        let editor_source = format!("{source}\n{context}");
+        let Some((data, resolved_pending)) = edit_brew_record(
+            database,
+            &editor_source,
+            initial_method,
+            pending.as_ref(),
+            None,
+        )?
         else {
             bail!("no brew was added");
         };
@@ -301,6 +308,39 @@ fn add_brew(database: &mut Database, coffee: Label, requested: DeviceLabel) -> R
     }
 }
 
+fn brew_add_context(
+    database: &Database,
+    method: BrewMethod,
+    pending: Option<&BrewDevice>,
+) -> Result<String> {
+    let mut context = String::from("# Grinders:\n");
+    let grinders = database.list_grinders()?;
+    if grinders.is_empty() {
+        context.push_str("#   No grinders registered yet.\n");
+    }
+    for grinder in grinders {
+        context.push_str(&format!(
+            "#   {}: {}\n",
+            grinder.label,
+            grinder.name.escape_debug()
+        ));
+    }
+    context.push_str(&format!("#\n# Devices ({method} only):\n"));
+    let mut devices = database.list_devices()?;
+    if let Some(device) = pending {
+        devices.push(device.clone());
+        devices.sort_by(|a, b| a.label.as_str().cmp(b.label.as_str()));
+    }
+    for device in devices.into_iter().filter(|device| device.method == method) {
+        context.push_str(&format!(
+            "#   {}: {}\n",
+            device.label,
+            device.name.escape_debug()
+        ));
+    }
+    Ok(context)
+}
+
 fn edit_brew(database: &mut Database, id: i64) -> Result<()> {
     let Some(current) = database.brew(id)? else {
         bail!("brew '{id}' does not exist");
@@ -330,7 +370,7 @@ fn edit_brew_record<'a>(
     let mut response = source.to_owned();
     loop {
         let user_text = edit_with_builder(&response, &builder).context("failed to edit brew")?;
-        if user_text == response {
+        if user_text == response || is_empty_toml(&user_text) {
             return Ok(None);
         }
         let attempt = (|| -> Result<(BrewData, Option<&BrewDevice>)> {
@@ -753,13 +793,20 @@ fn render_output<W: io::Write>(
     Ok(())
 }
 
+fn is_empty_toml(text: &str) -> bool {
+    text.lines().all(|line| {
+        let line = line.trim();
+        line.is_empty() || line.starts_with('#')
+    })
+}
+
 fn edit_record(source: &str, original: Option<&CoffeeData>) -> Result<Option<CoffeeData>> {
     let mut builder = Builder::new();
     builder.suffix(".toml");
     let mut response = source.to_owned();
     loop {
         let user_text = edit_with_builder(&response, &builder).context("failed to edit record")?;
-        if user_text == response {
+        if user_text == response || is_empty_toml(&user_text) {
             return Ok(None);
         }
         match CoffeeData::from_str(&user_text) {
